@@ -1,0 +1,58 @@
+/*
+ * Config.h — central settings model + persistence (NVS) + JSON.
+ *
+ * All user-tunable state lives in one Settings struct so the web portal,
+ * the effect engine, and persistence agree on a single source of truth.
+ */
+#pragma once
+#include <Arduino.h>
+
+// Effect modes. Saved settings store the number, so append new modes at the
+// end. Keep in sync with the <select> in WebPortal.cpp and the switch() in
+// EffectEngine.cpp.
+enum EffectMode : uint8_t {
+  // Ambient: no audio needed
+  MODE_STATIC = 0,
+  MODE_RAINBOW,
+  MODE_BREATHING,
+  // Audio: whole strip changes together
+  MODE_VU,
+  MODE_PITCH_COLOR,
+  // Audio: light moves along the strip
+  MODE_PITCH_POSITION,
+  MODE_PITCH_DIRECTION,
+  MODE_NOTE_FLOW,
+  MODE_RIPPLE,
+  MODE_COUNT
+};
+
+struct RGBColor { uint8_t r, g, b; };
+
+struct Settings {
+  bool     power;              // master on/off
+  uint8_t  brightness;         // 0..255
+  uint8_t  mode;               // EffectMode
+  uint8_t  speed;              // 1..100 animation / movement speed
+  uint8_t  trail;              // 1..100 trail length for moving effects
+  RGBColor staticColor;        // Static / Breathing base color
+  RGBColor noteColors[12];     // pitch-class C..B -> color
+
+  // Pitch -> strip position (Pitch position, Ripple)
+  uint8_t  pitchLow;           // MIDI note at the first LED (default E2 = 40)
+  uint8_t  pitchHigh;          // MIDI note at the last LED  (default E5 = 76)
+  bool     reverse;            // mirror moving effects to match how the strip is mounted
+
+  // Test/simulate controls (no live audio yet — preview effects now).
+  bool     testAuto;           // simulated player
+  float    testLevel;          // 0..1 held level in manual mode
+  int8_t   testNote;           // -1 = none, else MIDI note (45 = A2)
+};
+
+namespace ConfigStore {
+  void      begin();                               // load from NVS (or defaults)
+  void      save();                                // persist current settings
+  void      setDefaults();                         // reset in-memory to defaults
+  Settings& get();                                 // live reference
+  String    toJson();                              // serialize current settings
+  bool      fromJson(const String& body, String& err); // merge-update from JSON
+}

@@ -1,0 +1,1098 @@
+# Guitar Reactive RGB LED System
+
+## Project Overview
+
+This project turns a DIY electric guitar into a real-time, audio-reactive RGB instrument.
+
+The guitar has **16 WS2812B addressable RGB LEDs** installed on/in the body. An **ESP32-WROOM-32** reads the guitar's analog audio signal, analyzes it in real time, and generates visual effects.
+
+The system should eventually react to:
+
+- Guitar volume / amplitude (VU meter)
+- Peaks and transients
+- Rhythm / beat-like attacks
+- Pitch / single-note detection
+- Rising and falling pitch
+- Low / mid / high frequency energy
+- Sustain and decay
+- Configurable LED animations and color mappings
+
+The system is **not intended to recognize chords**. Single-note pitch detection is sufficient.
+
+The primary audio source is the **guitar's own electrical output**, not an ambient microphone. This prevents room noise, drums, vocals, and other instruments from affecting the LED behavior.
+
+---
+
+# Hardware
+
+## Main Components
+
+### Controller
+
+**Selected board: ESP32-WROOM-32 development board (ESP32 DevKit).**
+
+- ESP32-WROOM-32 (ESP32 DevKit)
+- CP2102 USB-UART development board
+- Prefer the 38-pin development board if purchasing a new board, although 30-pin versions are sufficient for this project.
+- Serial monitor / Serial Plotter baud rate: **115200** (ESP32 default used throughout this project).
+
+### Board Selection / Compatibility
+
+Two boards are available for this build:
+
+| Board | Role | Suitable as main controller? |
+|-------|------|------------------------------|
+| **ESP32-WROOM-32 (ESP32 DevKit)** | Main audio DSP + LED controller | ✅ Yes — **selected** |
+| NodeMCU ESP8266 (serial @ 9600 baud) | Optional / not required | ❌ No |
+
+The **ESP32-WROOM-32 is the only compatible controller for this project.** The real-time audio pipeline (8–16 kHz sampling, RMS/envelope follower, autocorrelation/YIN pitch detection, optional FFT) running *simultaneously* with driving 16 WS2812B LEDs needs the ESP32's dual-core 240 MHz CPU, ~520 KB SRAM, and multiple 12-bit ADC channels — including input-only ADC pins such as GPIO34 used in the pin plan below.
+
+The **NodeMCU ESP8266 is not suitable as the main controller** for this project, for the following hardware reasons:
+
+- **ADC:** It exposes only **one ADC input (A0)** at 10-bit resolution. Its sampling rate is limited and is disturbed while Wi-Fi is active, so it cannot provide reliable continuous audio sampling for DSP.
+- **CPU / RAM:** It is **single-core (80/160 MHz)** with far less usable RAM, which is marginal for real-time pitch detection and FFT.
+- **LED timing:** Bit-banging the WS2812B data line requires interrupts to be disabled during each frame, which conflicts with the ESP8266's Wi-Fi/timing behaviour and risks LED flicker or Wi-Fi instability.
+
+Because the ESP32-WROOM-32 already provides built-in Wi-Fi and Bluetooth, the ESP8266 is **not needed** for the core system or for the future wireless features. If desired, the ESP8266 could optionally be repurposed later as a **separate UART companion** (e.g. a telemetry or config bridge) talking to the ESP32 over serial at its **9600 baud** rate, but this is explicitly **outside the Phase 0–10 core system** and should not be added unless it solves a demonstrated problem.
+
+### LEDs
+
+- 16 × WS2812B addressable RGB LEDs
+- 5V LED power
+- Common GND between ESP32, audio circuit, and LED power supply
+
+### Guitar
+
+- DIY electric guitar
+- Harley Benton guitar kit passive pickups
+- Standard passive guitar electronics:
+  - Pickups
+  - Volume potentiometer
+  - Tone potentiometer
+  - Pickup selector
+  - Output jack
+
+The preferred audio tap point is the guitar output signal after the volume/control circuitry, so the ESP32 analyzes the actual guitar output.
+
+---
+
+# Audio Input Architecture
+
+The guitar signal must NOT be connected directly to an ESP32 ADC pin without signal conditioning.
+
+The guitar signal is an AC audio waveform and can swing below 0V. ESP32 ADC inputs cannot accept negative voltage.
+
+The input stage should therefore:
+
+1. Present a high impedance load to the passive guitar pickup/output.
+2. AC-couple the signal.
+3. Bias the signal around approximately 1.65V.
+4. Keep the signal within the ESP32 ADC input range.
+5. Optionally provide adjustable gain/filtering.
+
+Initial architecture:
+
+```text
+Guitar Output
+     |
+     +---------------------> Amplifier
+     |
+     +--> High-Z Buffer
+              |
+           AC coupling
+              |
+        1.65V bias point
+              |
+          ESP32 ADC
+```
+
+## Buffer / Op-Amp
+
+Preferred first choice:
+
+- TL072
+
+Possible alternatives:
+
+- TL082
+- MCP6022
+- OPA2134
+- NE5532
+- LM358 as a basic fallback
+
+Do not assume an op-amp is automatically suitable just because it is available. Check supply voltage, input/output range, biasing requirements, and the actual circuit before implementation.
+
+## ADC
+
+Start with the **ESP32 internal ADC**.
+
+Do NOT add ADS1115 or MCP3201 just because they have higher nominal resolution. They are not the preferred solution for this audio application.
+
+The project does not require studio-quality audio recording.
+
+A dedicated audio ADC such as PCM1808 could be considered later if the ESP32 ADC proves to be the limiting factor, but it is explicitly **not a requirement for Phase 1**.
+
+---
+
+# LED Signal Path
+
+The ESP32 drives the WS2812B data line.
+
+Recommended:
+
+```text
+ESP32 GPIO
+   |
+  330Ω
+   |
+WS2812B DIN
+```
+
+Place the 330Ω resistor close to the first LED.
+
+Add a bulk capacitor across the LED supply:
+
+```text
+5V ----+---- WS2812B
+       |
+     1000µF
+       |
+GND ---+
+```
+
+For a more robust design, consider a 74AHCT125 / 74HCT14 level shifter for converting the ESP32's 3.3V logic to a 5V WS2812 data signal.
+
+For only 16 LEDs, direct 3.3V data may work depending on LED type, wiring, and power conditions, but a level shifter is preferred for a production-quality installation.
+
+---
+
+# Important Electrical Rules
+
+- Never feed a negative guitar waveform directly into an ESP32 ADC.
+- Never feed more than the permitted ADC voltage into the ESP32.
+- ESP32, audio circuit, and LED power supply must share a suitable common ground.
+- Do not power 16 WS2812 LEDs from an ESP32 GPIO.
+- LEDs need their own suitable 5V power source.
+- Keep high-current LED wiring separate from the sensitive analog audio path where possible.
+- Keep the analog audio wiring short and away from LED power/data wiring.
+- Use a star/common grounding strategy where practical to reduce LED switching noise.
+- Add local decoupling capacitors around the ESP32 and analog circuit.
+
+---
+
+# Project Goals
+
+## Functional Goals
+
+The final system should be able to:
+
+### 1. VU Meter
+
+LED brightness or LED position should follow guitar signal amplitude.
+
+Example:
+
+```text
+Low volume     -> few/dim LEDs
+Medium volume  -> more LEDs
+High volume    -> many/bright LEDs
+Peak           -> temporary flash/accent
+```
+
+### 2. Transient / Attack Detection
+
+Detect strong changes in amplitude, such as:
+
+- Pick attack
+- Strong strum
+- Palm-muted hit
+- Accented note
+
+These events can trigger short LED flashes or color changes.
+
+### 3. Rhythm Response
+
+Detect repeated attacks/transients and create rhythm-reactive effects.
+
+This does not need to be a sophisticated music beat tracker. The system primarily needs to react musically to guitar attacks.
+
+### 4. Pitch Detection
+
+Detect the fundamental frequency of a **single guitar note**.
+
+Chord recognition is explicitly out of scope.
+
+Example:
+
+```text
+E2 ≈ 82.4 Hz
+A2 ≈ 110.0 Hz
+D3 ≈ 146.8 Hz
+G3 ≈ 196.0 Hz
+B3 ≈ 246.9 Hz
+E4 ≈ 329.6 Hz
+```
+
+The implementation should convert detected frequency to a musical note and optionally MIDI note number.
+
+### 5. Rising / Falling Pitch
+
+Track pitch over time.
+
+Example:
+
+```text
+E -> F# -> G -> A
+```
+
+can produce a rising LED animation.
+
+Similarly:
+
+```text
+A -> G -> F# -> E
+```
+
+can produce a falling animation.
+
+### 6. Frequency Energy
+
+The system may analyze low/mid/high frequency energy to create effects.
+
+This can be implemented with FFT or digital filters depending on CPU/memory requirements.
+
+FFT is useful for spectrum analysis, but it is not mandatory for pitch detection.
+
+---
+
+# DSP Architecture
+
+The audio processing pipeline should be modular.
+
+Recommended architecture:
+
+```text
+ADC
+ |
+ v
+Audio Buffer
+ |
+ +--> DC removal / normalization
+ |
+ +--> Amplitude / RMS
+ |
+ +--> Peak / transient detector
+ |
+ +--> Pitch detector
+ |
+ +--> Frequency-band analysis
+ |
+ v
+Feature State
+ |
+ v
+Effect Engine
+ |
+ v
+WS2812 LEDs
+```
+
+## Sampling
+
+Choose a suitable sample rate for guitar audio.
+
+Start around:
+
+- 8 kHz or
+- 16 kHz
+
+and benchmark CPU/memory usage.
+
+For pitch detection of low guitar notes, use sufficiently large analysis windows.
+
+The lowest standard guitar fundamental is around 82 Hz, so the algorithm must have enough observation time to distinguish low-frequency notes.
+
+Do not optimize for minimum latency at the expense of unstable pitch detection.
+
+---
+
+# Pitch Detection
+
+Pitch detection should be implemented separately from FFT.
+
+Preferred algorithms to investigate:
+
+1. Autocorrelation
+2. YIN
+3. McLeod Pitch Method (MPM)
+
+Start with autocorrelation or YIN because the target is monophonic guitar notes.
+
+Pitch detection should provide:
+
+```cpp
+struct PitchState {
+    bool valid;
+    float frequencyHz;
+    float confidence;
+    int midiNote;
+    float cents;
+};
+```
+
+Use confidence thresholds and smoothing to prevent LED flickering between incorrect notes.
+
+Pitch detection should include:
+
+- Noise gate
+- Minimum amplitude threshold
+- Confidence threshold
+- Temporal smoothing
+- Hysteresis
+- Optional note hold time
+- Optional attack/release behavior
+
+---
+
+# Audio Feature Model
+
+Create a central state structure instead of letting each LED effect read raw ADC data independently.
+
+Example:
+
+```cpp
+struct AudioFeatures {
+    float rms;
+    float peak;
+    float normalizedLevel;
+
+    bool attackDetected;
+    float attackStrength;
+
+    bool pitchValid;
+    float frequencyHz;
+    float pitchConfidence;
+    int midiNote;
+    float cents;
+
+    float lowEnergy;
+    float midEnergy;
+    float highEnergy;
+
+    float pitchVelocity;
+};
+```
+
+Effects consume this state.
+
+This keeps DSP separate from visualization.
+
+---
+
+# LED Effect Engine
+
+The LED code should be independent from audio acquisition.
+
+Recommended interface:
+
+```cpp
+class Effect {
+public:
+    virtual void update(const AudioFeatures& audio, uint32_t now) = 0;
+};
+```
+
+Possible effects:
+
+## Effect 1 - VU Meter
+
+Map normalized amplitude to LED count.
+
+## Effect 2 - Peak Flash
+
+Normal VU meter with a short white/color flash when an attack is detected.
+
+## Effect 3 - Pitch Color
+
+Map musical notes or pitch classes to colors.
+
+Example:
+
+```text
+C  -> red
+C# -> orange
+D  -> yellow
+D# -> green
+E  -> cyan
+F  -> blue
+F# -> violet
+G  -> magenta
+...
+```
+
+The exact palette should be configurable.
+
+## Effect 4 - Pitch Position
+
+Map pitch/frequency to LED position.
+
+Low notes can illuminate one side and high notes the other.
+
+## Effect 5 - Rising/Falling
+
+Use pitch velocity:
+
+```text
+pitchVelocity > threshold
+    -> rising animation
+
+pitchVelocity < -threshold
+    -> falling animation
+```
+
+## Effect 6 - Frequency Bands
+
+Divide the 16 LEDs into low/mid/high regions.
+
+Example:
+
+```text
+LED 0-4    -> low
+LED 5-10   -> mid
+LED 11-15  -> high
+```
+
+## Effect 7 - Sustain
+
+When a note continues:
+
+- attack = bright
+- sustain = stable/dimmed
+- release = gradual fade
+
+---
+
+# Software Architecture
+
+Use a modular architecture.
+
+Suggested project structure:
+
+```text
+src/
+  main.cpp
+
+  audio/
+    AudioInput.cpp
+    AudioInput.h
+    AudioBuffer.cpp
+    AudioBuffer.h
+
+  dsp/
+    AudioFeatures.cpp
+    AudioFeatures.h
+    PitchDetector.cpp
+    PitchDetector.h
+    EnvelopeDetector.cpp
+    EnvelopeDetector.h
+    FrequencyAnalyzer.cpp
+    FrequencyAnalyzer.h
+
+  leds/
+    LedController.cpp
+    LedController.h
+
+  effects/
+    Effect.h
+    VuEffect.cpp
+    VuEffect.h
+    PitchEffect.cpp
+    PitchEffect.h
+    RhythmEffect.cpp
+    RhythmEffect.h
+    SpectrumEffect.cpp
+    SpectrumEffect.h
+
+  config/
+    Config.h
+```
+
+Use PlatformIO if possible.
+
+---
+
+# Development Phases
+
+## Phase 0 - Hardware Validation
+
+Goal: Verify the hardware independently.
+
+Tasks:
+
+- Verify ESP32 programming.
+- Verify 16 WS2812 LEDs.
+- Verify LED power supply.
+- Verify common ground.
+- Verify LED data signal.
+- Run a simple rainbow/chase test.
+
+Acceptance criteria:
+
+- All 16 LEDs work.
+- No random flickering.
+- ESP32 remains stable.
+
+Do not start DSP work until this phase works.
+
+---
+
+## Phase 1 - Analog Guitar Input
+
+Goal: Read the guitar waveform safely.
+
+Tasks:
+
+- Build high-impedance input buffer.
+- Add AC coupling.
+- Create 1.65V bias.
+- Connect to an ESP32 ADC pin.
+- Read raw ADC values.
+- Remove DC offset in software.
+- Plot/log ADC samples.
+
+Acceptance criteria:
+
+- Guitar signal is visible in Serial Plotter or equivalent.
+- No clipping under normal guitar playing.
+- No negative ADC readings.
+- ADC input stays within safe limits.
+- Amplifier output remains usable when ESP32 input is connected.
+- Guitar tone is not audibly degraded.
+
+Do not implement pitch detection yet.
+
+---
+
+## Phase 2 - VU Meter
+
+Goal: Make LEDs respond to guitar amplitude.
+
+Tasks:
+
+- Calculate DC-corrected amplitude.
+- Implement envelope follower / RMS.
+- Normalize the signal.
+- Implement attack and release smoothing.
+- Map level to 16 LEDs.
+
+Acceptance criteria:
+
+- Soft playing produces low LED levels.
+- Hard playing produces high LED levels.
+- LED response is smooth.
+- No visible flicker.
+- No significant latency.
+
+---
+
+## Phase 3 - Peak / Attack Detection
+
+Goal: Detect individual guitar attacks.
+
+Tasks:
+
+- Calculate short-term envelope.
+- Compare against previous envelope.
+- Add threshold and hysteresis.
+- Add cooldown/refractory period.
+- Produce attack strength from 0.0 to 1.0.
+
+Acceptance criteria:
+
+- Individual picked notes generate attacks.
+- Sustained notes do not repeatedly trigger attacks.
+- Strong strums produce stronger attacks.
+
+---
+
+## Phase 4 - Pitch Detection
+
+Goal: Detect single-note guitar pitch.
+
+Tasks:
+
+- Implement autocorrelation or YIN.
+- Start with the standard guitar range.
+- Detect E2 through at least E5 if practical.
+- Calculate confidence.
+- Convert frequency to MIDI note.
+- Calculate cents deviation.
+- Smooth pitch over time.
+
+Acceptance criteria:
+
+- Open strings are reliably detected.
+- Single fretted notes are reliably detected.
+- Noise does not continuously create false notes.
+- Pitch changes do not cause excessive LED flicker.
+
+Do not attempt chord recognition.
+
+---
+
+## Phase 5 - Pitch Movement
+
+Goal: Detect rising/falling notes.
+
+Tasks:
+
+- Maintain previous stable pitch.
+- Calculate pitch delta per unit time.
+- Smooth pitch velocity.
+- Detect rising/falling trends.
+- Trigger directional animations.
+
+Acceptance criteria:
+
+- Slides upward produce a visually rising effect.
+- Slides downward produce a visually falling effect.
+- Vibrato does not constantly trigger large directional movements.
+
+---
+
+## Phase 6 - Frequency Analysis
+
+Goal: Add richer audio-reactive effects.
+
+Possible implementations:
+
+- FFT
+- Goertzel filters
+- IIR/FIR band-pass filters
+
+Analyze:
+
+- Low
+- Mid
+- High
+
+frequency energy.
+
+Acceptance criteria:
+
+- Low-frequency guitar content produces low-band activity.
+- Pick/high-frequency content produces high-band activity.
+- Effects remain stable while LEDs update.
+
+FFT is optional for the first working version.
+
+---
+
+## Phase 7 - Effect Engine
+
+Goal: Build the final visual system.
+
+Implement:
+
+- VU Meter
+- Peak Flash
+- Pitch Color
+- Pitch Position
+- Rising/Falling
+- Frequency Bands
+- Sustain
+- Rainbow
+- Breathing
+- Static/Manual color
+
+All effects should use the common `AudioFeatures` structure.
+
+Avoid blocking delays.
+
+Use `millis()` or another non-blocking timing approach.
+
+---
+
+## Phase 8 - Mode Control
+
+Add a physical button or rotary encoder.
+
+Possible modes:
+
+```text
+0 - VU
+1 - Peak
+2 - Pitch
+3 - Pitch Direction
+4 - Frequency Bands
+5 - Hybrid
+6 - Rainbow
+7 - Custom
+```
+
+A long press may control brightness.
+
+A short press changes effect.
+
+---
+
+## Phase 9 - Power / Guitar Integration
+
+Integrate the electronics into the guitar.
+
+Tasks:
+
+- Secure ESP32.
+- Secure analog audio circuit.
+- Secure LED wiring.
+- Add appropriate power regulation.
+- Add decoupling.
+- Add connectors for serviceability.
+- Separate analog and high-current LED wiring.
+- Test with strings, pickups, pots, and output jack fully installed.
+
+If using a battery:
+
+```text
+Battery
+  |
+Protection / Charger
+  |
+5V Regulation
+  |
++---- ESP32
++---- WS2812
+```
+
+The exact power architecture must be selected based on the battery voltage, LED current, and desired operating time.
+
+---
+
+## Phase 10 - Optimization
+
+Optimize only after the complete system works.
+
+Measure:
+
+- ADC sampling stability
+- DSP CPU usage
+- LED update time
+- RAM usage
+- Latency
+- Pitch detection accuracy
+- Noise floor
+- Battery consumption
+
+Do not prematurely add a high-end external ADC.
+
+---
+
+# Important Design Constraints
+
+## No microphone in the primary design
+
+The primary system should analyze the guitar's electrical output.
+
+An INMP441 microphone may be added later as an optional ambient/audio mode, but it is not required for the main guitar-reactive system.
+
+## No chord recognition
+
+Do not spend development time on chord recognition.
+
+Single-note pitch detection is sufficient.
+
+## Do not block the main loop
+
+Avoid:
+
+```cpp
+delay(...)
+```
+
+for effect timing.
+
+Use non-blocking timing.
+
+## LED updates must not destroy audio timing
+
+Audio sampling must remain deterministic enough for DSP.
+
+Prefer buffered sampling and separate processing from LED rendering.
+
+## Keep DSP and LED rendering separate
+
+The audio layer should produce features.
+
+The effect layer should consume features.
+
+---
+
+# Initial Pin Plan
+
+For a typical ESP32-WROOM-32 development board, a possible starting configuration is:
+
+```text
+GPIO34  -> Guitar ADC input
+GPIO18  -> WS2812 data
+GPIO25  -> Mode button
+```
+
+GPIO34 is input-only and is suitable for ADC input.
+
+Do not blindly assume every ESP32 development board has identical pin labeling. Verify the exact board before wiring.
+
+Avoid using ESP32 boot-strapping pins unnecessarily.
+
+---
+
+# Wi-Fi Control Portal (current firmware)
+
+The ESP32 runs its own Wi-Fi access point and serves a control page. No router or app is needed.
+
+```text
+Wi-Fi network : GuitarRGB
+Password      : guitarled
+URL           : http://192.168.4.1/   (or http://guitar.local/ on macOS/iOS)
+```
+
+The page shows a live preview of the 16 LEDs and controls power, brightness, effect, speed, trail length, static color, a **note → color** table (12 pitch classes, C to B, any octave), and the **pitch → position** range (lowest/highest note on the strip, plus a reverse switch for how the strip is mounted). Mappings are per single note, not per chord, because chord recognition is out of scope.
+
+Effects:
+
+| Group | Effect | Behaviour |
+|---|---|---|
+| Ambient | Static color, Rainbow, Breathing | No audio needed |
+| Whole strip | VU meter | Lit LED count follows level |
+| Whole strip | Pitch color | All LEDs take the current note's color |
+| Moving | Pitch position | Dot at the note's place between lowest and highest note, with a trail (readme Effect 4) |
+| Moving | Pitch direction | Bands travel up while pitch rises, down while it falls, still on a steady note (readme Effect 5) |
+| Moving | Note flow | Each note's color enters at one end and scrolls along the strip |
+| Moving | Ripple | Each pick sends pulses outward from the note's position |
+
+Pitch direction caps band speed so a note jump does not alias into backwards motion, and ignores pitch changes under 1.5 semitones/s so vibrato does not read as movement.
+
+Until the guitar input exists (Phase 1+), `AudioSim` produces the `AudioFeatures` the effects consume. **Auto-play** simulates picked notes with decay and short slides; with auto-play off, the page holds a chosen note and level, and **Pluck** adds an attack. The real DSP will fill the same `AudioFeatures` struct, so the effects do not change.
+
+Settings apply to the LEDs immediately and are saved to flash (NVS) after 2 seconds without further changes, so they survive power cycles.
+
+API (JSON):
+
+```text
+GET  /api/config   current settings
+POST /api/config   partial or full update, applied live
+POST /api/reset    restore defaults
+GET  /api/leds     current LED colors, LED 0 first
+POST /api/pluck    simulated pick attack
+```
+
+USB serial commands (115200 baud, one per line), for configuring and testing without Wi-Fi:
+
+```text
+{json}   apply settings, same format as POST /api/config (saved immediately)
+cfg      print current settings
+leds     print the LED buffer as hex, LED 0 first
+pluck    simulated pick attack
+```
+
+Firmware notes:
+
+- FastLED is pinned to 3.7.8. FastLED 3.10.x does not detect the ESP32 RMT driver on Arduino-ESP32 core 2.0.x and falls back to a blocking bit-bang driver that flickers with Wi-Fi active.
+- The `huge_app.csv` partition (3 MB app, no OTA) is used. Revisit when OTA updates are added.
+
+---
+
+# Initial Analog Circuit
+
+The first prototype should use:
+
+```text
+             3.3V
+              |
+             100k
+              |
+              +---------- ADC GPIO34
+              |
+             100k
+              |
+             GND
+
+Guitar signal
+     |
+   100nF
+     |
+     +---------- ADC/buffer input
+```
+
+This is only a starting topology.
+
+For the final circuit, use a high-impedance buffer before the ADC and verify the actual signal amplitude and biasing with a multimeter/oscilloscope.
+
+Do not connect a potentially negative guitar signal directly to the ESP32.
+
+---
+
+# Testing Strategy
+
+Each phase must have an independent test.
+
+Examples:
+
+### LED test
+
+```text
+Rainbow -> Red -> Green -> Blue -> Off
+```
+
+### ADC test
+
+Display:
+
+```text
+min
+max
+average
+RMS
+```
+
+### VU test
+
+Print:
+
+```text
+level=0.72
+```
+
+and display corresponding LED count.
+
+### Pitch test
+
+Print:
+
+```text
+frequency=110.3 Hz
+note=A2
+confidence=0.91
+cents=+4
+```
+
+### Attack test
+
+Print:
+
+```text
+ATTACK strength=0.83
+```
+
+This makes debugging much easier than debugging the full system at once.
+
+---
+
+# Performance Targets
+
+Initial targets:
+
+- Audio sample rate: 8-16 kHz
+- 16 WS2812 LEDs
+- Pitch detection latency target: <100 ms
+- LED animation target: 30-60 FPS
+- Stable operation without audio dropouts
+- No audible impact on the guitar's normal output
+
+These are targets, not absolute requirements. Optimize based on measured behavior.
+
+---
+
+# Future Features
+
+Possible future additions:
+
+- Bluetooth configuration
+- Wi-Fi configuration page
+- Mobile app
+- OTA firmware update
+- Preset storage
+- User-defined color palettes
+- MIDI output
+- Tuner mode
+- Metronome synchronization
+- Battery level display
+- Accelerometer/IMU for motion-reactive effects
+- Ambient microphone mode
+- Multiple pickup/input modes
+
+---
+
+# Recommended Development Order
+
+Do not implement everything at once.
+
+Follow this order:
+
+```text
+ESP32
+  ↓
+16 LEDs
+  ↓
+Guitar ADC
+  ↓
+VU Meter
+  ↓
+Attack Detection
+  ↓
+Pitch Detection
+  ↓
+Pitch Direction
+  ↓
+Frequency Analysis
+  ↓
+Effect Engine
+  ↓
+Mode Button
+  ↓
+Final Guitar Integration
+  ↓
+Optimization
+```
+
+The project should always have a working state after each phase.
+
+---
+
+# Claude Code Instructions
+
+When working on this project:
+
+1. Do not rewrite working hardware code unnecessarily.
+2. Implement one phase at a time.
+3. Before moving to the next phase, provide a short test procedure.
+4. Keep audio acquisition, DSP, and LED rendering modular.
+5. Avoid blocking code.
+6. Do not introduce external hardware unless it solves a demonstrated problem.
+7. Prefer ESP32 internal ADC for the first implementation.
+8. Do not introduce ADS1115 for audio.
+9. Do not introduce MCP3201 unless there is a demonstrated requirement.
+10. Do not introduce PCM1808 or another external audio ADC unless ESP32 ADC performance has been measured and found insufficient.
+11. Do not implement chord recognition.
+12. Treat single-note pitch detection as the pitch-analysis requirement.
+13. Preserve a clean separation between raw audio acquisition and visualization.
+14. Make thresholds, sample rate, gain, LED brightness, colors, and effect parameters configurable.
+15. Document all hardware assumptions.
+16. If a hardware change is required, explain why before changing the architecture.
+
+---
+
+# Definition of Done
+
+The project is considered successful when:
+
+- The guitar plays normally through its amplifier.
+- The ESP32 receives a safe version of the guitar signal.
+- The 16 WS2812 LEDs operate reliably.
+- Guitar volume changes affect the LEDs.
+- Pick attacks produce visible reactions.
+- Single notes can be detected.
+- Rising and falling pitch can trigger directional effects.
+- Frequency content can drive additional effects.
+- The system remains responsive while audio analysis and LED animation run simultaneously.
+- No noticeable degradation of the guitar signal is introduced.
+- The complete system can operate reliably inside the DIY guitar.
