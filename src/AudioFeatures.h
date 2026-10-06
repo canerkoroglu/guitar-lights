@@ -13,5 +13,6 @@ struct AudioFeatures {
   float attackStrength;  // 0..1
   bool  pitchValid;      // a single note is currently detected
   float midiNote;        // continuous MIDI pitch: 45.0 = A2, 45.5 = A2 + 50 cents
+  int   note;            // steady note with hysteresis (use for colors), -1 if none
   float pitchVelocity;   // semitones per second, + rising / - falling
 };

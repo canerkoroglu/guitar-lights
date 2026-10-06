@@ -8,16 +8,16 @@ static inline CRGB scaled(CRGB c, float k) {
   return c;
 }
 
-static inline int pitchClass(float midi) { return ((int)lroundf(midi) % 12 + 12) % 12; }
-
-static inline CRGB noteColor(const Settings& s, float midi) {
-  return toCRGB(s.noteColors[pitchClass(midi)]);
+// Color of the steady note (the pitch tracker's note with hysteresis), so a
+// note sitting between two names does not flicker between two colors.
+static inline CRGB noteColor(const Settings& s, const AudioFeatures& a) {
+  const int note = a.note >= 0 ? a.note : (int)lroundf(a.midiNote);
+  return toCRGB(s.noteColors[(note % 12 + 12) % 12]);
 }
 
-// Note color while a pitch is known, otherwise the static color. (Until
-// Phase 4, pitch only exists with the simulated guitar.)
+// Note color while a pitch is known, otherwise the static color.
 static inline CRGB noteOrStatic(const Settings& s, const AudioFeatures& a) {
-  return a.pitchValid ? noteColor(s, a.midiNote) : toCRGB(s.staticColor);
+  return a.pitchValid ? noteColor(s, a) : toCRGB(s.staticColor);
 }
 
 // Trail 1..100 -> per-frame fade amount (long trail = gentle fade).
@@ -45,6 +45,16 @@ void EffectEngine::dotAt(const Settings& s, float pos, const CRGB& c) {
   if (i0 + 1 < n_) leds_[idx(s, i0 + 1)] |= scaled(c, frac);
 }
 
+void EffectEngine::recolorRecent(const Settings& s, const AudioFeatures& a) {
+  const CRGB c = noteColor(s, a);
+  if (youngestRipple_ >= 0 && ripples_[youngestRipple_].active) {
+    ripples_[youngestRipple_].color  = c;
+    ripples_[youngestRipple_].center = pitchPos(s, a.midiNote);
+  }
+  if (youngestComet_ >= 0 && comets_[youngestComet_].active) comets_[youngestComet_].color = c;
+  flashColor_ = blend(CRGB(CRGB::White), c, 64);
+}
+
 // VU bar: lit LED count follows level; green at the start -> red at the end.
 void EffectEngine::drawVu(const Settings& s, float level) {
   int lit = (int)roundf(constrain(level, 0.0f, 1.0f) * n_);
@@ -66,6 +76,16 @@ void EffectEngine::render(const Settings& s, uint32_t now, const AudioFeatures& 
     fill_solid(leds_, n_, CRGB::Black);
     return;
   }
+
+  // Pitch detection confirms a note ~30-60 ms after the pick that starts it.
+  // When a new note arrives right after an attack, recolor what that attack
+  // spawned, so ripples, comets and flashes carry the new note, not the old.
+  static constexpr uint32_t RECOLOR_MS = 150;
+  if (a.attackDetected) attackAt_ = now;
+  if (a.pitchValid && a.note >= 0 && a.note != lastNote_ && now - attackAt_ < RECOLOR_MS) {
+    recolorRecent(s, a);
+  }
+  if (a.pitchValid) lastNote_ = a.note;
 
   const uint32_t spd = s.speed;   // 1..100
 
@@ -93,7 +113,7 @@ void EffectEngine::render(const Settings& s, uint32_t now, const AudioFeatures& 
       break;
 
     case MODE_PITCH_COLOR:
-      if (a.pitchValid) fill_solid(leds_, n_, noteColor(s, a.midiNote));
+      if (a.pitchValid) fill_solid(leds_, n_, noteColor(s, a));
       else              fill_solid(leds_, n_, CRGB(8, 8, 8));  // idle glow: no note
       break;
 
@@ -126,7 +146,7 @@ void EffectEngine::render(const Settings& s, uint32_t now, const AudioFeatures& 
 void EffectEngine::renderPitchPosition(const Settings& s, const AudioFeatures& a) {
   fadeToBlackBy(leds_, n_, trailFade(s));
   if (!a.pitchValid) return;
-  dotAt(s, pitchPos(s, a.midiNote), scaled(noteColor(s, a.midiNote), 0.25f + 0.75f * a.level));
+  dotAt(s, pitchPos(s, a.midiNote), scaled(noteColor(s, a), 0.25f + 0.75f * a.level));
 }
 
 // Pitch direction (readme.md Effect 5): bands in the note's color travel
@@ -153,7 +173,7 @@ void EffectEngine::renderPitchDirection(const Settings& s, const AudioFeatures& 
   phase_ += bandSpeed * dt;
   phase_  = fmodf(phase_, WAVELEN * 1000.0f);      // bound it, stay a whole number of bands
 
-  CRGB  base = noteColor(s, a.midiNote);
+  CRGB  base = noteColor(s, a);
   float k    = 0.15f + 0.85f * a.level;
   for (uint16_t i = 0; i < n_; i++) {
     int32_t theta = (int32_t)lroundf((i - phase_) / WAVELEN * 256.0f);
@@ -169,7 +189,7 @@ void EffectEngine::renderPitchDirection(const Settings& s, const AudioFeatures& 
 void EffectEngine::renderNoteFlow(const Settings& s, const AudioFeatures& a, float dt) {
   fadeToBlackBy(leds_, n_, trailFade(s) / 6);
 
-  CRGB in = a.pitchValid ? scaled(noteColor(s, a.midiNote), a.level) : CRGB::Black;
+  CRGB in = a.pitchValid ? scaled(noteColor(s, a), a.level) : CRGB::Black;
 
   flowAcc_ += dt * (2.0f + s.speed * 0.38f);   // speed 1..100 -> ~2..40 LEDs/s
   while (flowAcc_ >= 1.0f) {
@@ -191,8 +211,9 @@ void EffectEngine::renderRipple(const Settings& s, const AudioFeatures& a, float
       if (ripples_[r].radius > ripples_[slot].radius) slot = r;
     }
     float center = a.pitchValid ? pitchPos(s, a.midiNote) : (n_ - 1) / 2.0f;
-    CRGB  color  = a.pitchValid ? noteColor(s, a.midiNote) : CRGB::White;
-    ripples_[slot] = {center, 0.0f, fmaxf(0.3f, a.attackStrength), color, true};
+    CRGB  color  = a.pitchValid ? noteColor(s, a) : CRGB::White;
+    ripples_[slot]  = {center, 0.0f, fmaxf(0.3f, a.attackStrength), color, true};
+    youngestRipple_ = slot;
   }
 
   const float maxR  = (float)n_;
@@ -251,7 +272,7 @@ void EffectEngine::renderPeakFlash(const Settings& s, const AudioFeatures& a, ui
   if (a.attackDetected) {
     flashPeak_  = fmaxf(0.35f, a.attackStrength);
     flashStart_ = now;
-    flashColor_ = a.pitchValid ? blend(CRGB(CRGB::White), noteColor(s, a.midiNote), 64) : CRGB(CRGB::White);
+    flashColor_ = a.pitchValid ? blend(CRGB(CRGB::White), noteColor(s, a), 64) : CRGB(CRGB::White);
   }
   const uint32_t age = now - flashStart_;
   if (flashPeak_ > 0.0f && age < FLASH_MS) {
@@ -266,7 +287,7 @@ void EffectEngine::renderPeakFlash(const Settings& s, const AudioFeatures& a, ui
 // color is kept through the fade, so the strip does not jump to the static
 // color the moment the note stops.
 void EffectEngine::renderSustain(const Settings& s, const AudioFeatures& a, float dt) {
-  if (a.pitchValid)                               sustainColor_ = noteColor(s, a.midiNote);
+  if (a.pitchValid)                               sustainColor_ = noteColor(s, a);
   else if (a.attackDetected || sustain_ <= 0.01f) sustainColor_ = toCRGB(s.staticColor);
 
   if (a.attackDetected)    sustain_ = 1.0f;
@@ -344,7 +365,8 @@ void EffectEngine::renderComet(const Settings& s, const AudioFeatures& a, float 
       if (comets_[c].pos > comets_[slot].pos) slot = c;
     }
     const float speed = (5.0f + s.speed * 0.4f) * fmaxf(0.3f, a.attackStrength);   // LEDs/s
-    comets_[slot] = {0.0f, speed, noteOrStatic(s, a), true};
+    comets_[slot]  = {0.0f, speed, noteOrStatic(s, a), true};
+    youngestComet_ = slot;
   }
   for (Comet& c : comets_) {
     if (!c.active) continue;

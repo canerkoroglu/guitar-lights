@@ -32,6 +32,7 @@ private:
   float    pitchPos(const Settings& s, float midi) const;     // 0..n-1
   void     dotAt(const Settings& s, float pos, const CRGB& c);
   void     drawVu(const Settings& s, float level);            // VU meter and Peak flash
+  void     recolorRecent(const Settings& s, const AudioFeatures& a);
 
   void renderPitchPosition(const Settings& s, const AudioFeatures& a);
   void renderPitchDirection(const Settings& s, const AudioFeatures& a, float dt);
@@ -66,4 +67,8 @@ private:
   Comet    comets_[MAX_COMETS] = {};
   float    stepFrom_ = 0.0f, stepTarget_ = 0.0f;
   uint32_t stepStart_ = 0;
+
+  // Late note: pitch is confirmed a little after the attack that starts it.
+  int      youngestRipple_ = -1, youngestComet_ = -1, lastNote_ = -1;
+  uint32_t attackAt_ = 0;
 };

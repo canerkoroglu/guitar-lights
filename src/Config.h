@@ -60,6 +60,7 @@ struct Settings {
   int8_t   fullDb;             // this loud lights every LED (dB re full scale)
   uint16_t releaseMs;          // how fast the level falls after playing stops
   uint8_t  attackDb;           // attack threshold: level rise within 12 ms (dB)
+  uint8_t  pitchConf;          // Phase 4: minimum pitch confidence, % (YIN threshold = 1 - this)
 
   // Simulated guitar (used when audioSource = SOURCE_SIMULATED)
   bool     testAuto;           // auto-play

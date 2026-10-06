@@ -1,75 +1,47 @@
 #include "AudioDsp.h"
-#include <math.h>
-#include "EnvelopeDetector.h"
-#include "AttackDetector.h"
+#include "AudioAnalyzer.h"
 #include "GuitarSynth.h"
 
 namespace {
 
-constexpr float ATTACK_MS = 2.0f;   // envelope attack: follows a pick within a few ms
-
-EnvelopeDetector env;
-AttackDetector   att;
-float            fs = 16000.0f, fullScale = 900.0f;
-uint16_t         releaseMs = 0;
-
-float  hop[AttackDetector::HOP];
-size_t hopFill = 0;
-
-float    db = -120.0f, level = 0.0f, rise = 0.0f, strength = 0.0f;
-uint32_t attacks = 0;
-float    prevMidi = 0.0f, velocity = 0.0f;
-bool     havePrev = false;
-
+AudioAnalyzer      analyzer;
+float              fs  = 16000.0f;
+float              cpu = 0.0f;
 portMUX_TYPE       mux = portMUX_INITIALIZER_UNLOCKED;
 AudioDsp::Snapshot published = {};
 
 }  // namespace
 
 void AudioDsp::begin(float sampleRate, float fullScaleLsb) {
-  fs        = sampleRate;
-  fullScale = fullScaleLsb;
-  att.configure(fs);
+  fs = sampleRate;
+  analyzer.configure(sampleRate, fullScaleLsb);
 }
 
 void AudioDsp::process(const float* ac, size_t n, const Settings& s, bool simulated) {
-  if (s.releaseMs != releaseMs) {
-    releaseMs = s.releaseMs;
-    env.configure(fs, ATTACK_MS, releaseMs);
-  }
+  const uint32_t t0 = micros();
 
-  for (size_t i = 0; i < n; i++) {
-    hop[hopFill++] = ac[i];
-    if (hopFill < AttackDetector::HOP) continue;
-    hopFill = 0;
+  AnalyzerParams p;
+  p.gateDb    = s.gateDb;
+  p.fullDb    = s.fullDb;
+  p.releaseMs = s.releaseMs;
+  p.attackDb  = s.attackDb;
+  p.pitchConf = s.pitchConf / 100.0f;
+  analyzer.process(ac, n, p);
 
-    env.process(hop, AttackDetector::HOP);
-    db    = EnvelopeDetector::toDb(env.envelope(), fullScale);
-    level = EnvelopeDetector::normalize(db, s.gateDb, s.fullDb);
-    if (att.processHop(hop, db, s.attackDb, db > s.gateDb)) {
-      attacks++;
-      strength = level;
-    }
-    rise = att.riseDb();
-  }
+  // Share of real time spent here (n samples arrive every n/fs seconds).
+  const float us = (float)(micros() - t0);
+  cpu += (100.0f * us / (n * 1e6f / fs) - cpu) * 0.05f;
 
-  // Pitch: simulated guitar only, until Phase 4.
-  bool  pitchValid = false;
-  float midi = prevMidi;
+  float truth = -1.0f;
   if (simulated) {
     const GuitarSynth::Truth t = GuitarSynth::truth();
-    pitchValid = t.sounding && level > 0.0f;
-    midi = t.midi;
+    if (t.sounding) truth = t.midi;
   }
-  const float dt = n / fs;
-  if (havePrev && dt > 0.0f) {
-    const float raw = (midi - prevMidi) / dt;
-    velocity += (raw - velocity) * fminf(1.0f, dt * 10.0f);
-  }
-  prevMidi = midi;
-  havePrev = true;
 
-  Snapshot out = {level, db, rise, attacks, strength, pitchValid, midi, velocity};
+  const AnalyzerOutput& o = analyzer.output();
+  const Snapshot out = {o.level, o.db, o.rise, o.attacks, o.attackStrength,
+                        o.pitch.valid, o.pitch.midi, o.pitch.midiNote, o.pitch.cents,
+                        o.pitch.confidence, o.velocity, truth, cpu};
   portENTER_CRITICAL(&mux);
   published = out;
   portEXIT_CRITICAL(&mux);

@@ -8,7 +8,8 @@
  *   GET  /api/presets -> {"presets":["Classic VU", ...]}
  *   POST /api/preset?i=N -> apply preset N, return the full settings JSON
  *   POST /api/reset   -> restore defaults, save, return them as JSON
- *   GET  /api/leds    -> {"leds":["#rrggbb",...], "level", "db", "rise", "attacks"}
+ *   GET  /api/leds    -> {"leds":["#rrggbb",...], "level", "db", "rise", "attacks",
+ *                         "note" (-1 if none), "cents", "conf"}
  *   POST /api/pluck   -> pick the simulated guitar once
  *   GET  /api/adc     -> guitar input stats + latest 512 raw samples
  *   POST /api/tone?on=1|0 -> DAC test tone on GPIO26 (loopback test)

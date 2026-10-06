@@ -1,12 +1,12 @@
 /*
- * AudioDsp.h — turns DC-free samples into features for the effects.
+ * AudioDsp.h — firmware wrapper around lib/dsp AudioAnalyzer:
  *
- *   Phase 2  EnvelopeDetector -> dB -> 0..1 VU level (gate / full scale)
- *   Phase 3  AttackDetector   -> attack events with strength
- *   Phase 4  pitch: not yet. With the simulated guitar, the note being
- *            played is passed through so pitch effects keep working.
+ *   Phase 2  VU level        Phase 3  attacks
+ *   Phase 4  pitch (YIN + tracker: steady note, cents, confidence)
  *
  * process() runs in the audio task; snapshot() is safe from any task.
+ * With the simulated guitar it also reports the note actually being
+ * played, so pitch detection can be checked against it.
  */
 #pragma once
 #include <Arduino.h>
@@ -24,7 +24,12 @@ namespace AudioDsp {
     float    attackStrength;  // level at the last attack
     bool     pitchValid;
     float    midi;            // continuous MIDI pitch
+    int      note;            // steady note with hysteresis, -1 if none
+    float    cents;           // pitch relative to note
+    float    confidence;      // 0..1 periodicity of the last accepted estimate
     float    velocity;        // semitones per second
+    float    truthMidi;       // simulated guitar's note, -1 if not simulated or silent
+    float    cpu;             // % of real time spent in process()
   };
   Snapshot snapshot();
 }

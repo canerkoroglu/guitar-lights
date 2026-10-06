@@ -148,12 +148,14 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
       <option value="1">Guitar input (GPIO34)</option>
     </select></div>
   <div class="row"><span>Level</span><div class="meter"><i id="meter"></i></div><b class="dot" id="attackDot" title="attack"></b></div>
+  <div class="row"><span>Pitch</span><b id="pitchNow">&ndash;</b></div>
   <p class="hint" id="audioStat">&ndash;</p>
   <div class="row"><span>Noise gate<small id="gateDbV"></small></span><input type="range" id="gateDb" min="-80" max="-10"></div>
   <div class="row"><span>Full scale<small id="fullDbV"></small></span><input type="range" id="fullDb" min="-40" max="0"></div>
   <div class="row"><span>Release<small id="releaseMsV"></small></span><input type="range" id="releaseMs" min="20" max="1000" step="10"></div>
   <div class="row"><span>Attack threshold<small id="attackDbV"></small></span><input type="range" id="attackDb" min="2" max="30"></div>
-  <p class="hint">Noise gate: anything quieter counts as silence. Full scale: this loud lights every LED. Release: how fast the level falls. Attack threshold: how sharp a jump counts as a pick; lower is more sensitive.</p>
+  <div class="row"><span>Pitch confidence<small id="pitchConfV"></small></span><input type="range" id="pitchConf" min="50" max="99"></div>
+  <p class="hint">Noise gate: anything quieter counts as silence. Full scale: this loud lights every LED. Release: how fast the level falls. Attack threshold: how sharp a jump counts as a pick; lower is more sensitive. Pitch confidence: how clean a note must be before its pitch is used; lower accepts messier notes.</p>
 </div>
 
 <div class="card">
@@ -232,6 +234,7 @@ function fill(c){
   $("fullDb").value=c.fullDb;
   $("releaseMs").value=c.releaseMs;
   $("attackDb").value=c.attackDb;
+  $("pitchConf").value=c.pitchConf;
   $("testAuto").checked=c.test.auto;
   $("testLevel").value=Math.round(c.test.level*100);
   $("testNote").value=c.test.note;
@@ -244,6 +247,7 @@ function labels(){
   $("fullDbV").textContent=$("fullDb").value+" dB";
   $("releaseMsV").textContent=$("releaseMs").value+" ms";
   $("attackDbV").textContent=$("attackDb").value+" dB";
+  $("pitchConfV").textContent=$("pitchConf").value+" %";
 }
 
 function collect(){
@@ -253,7 +257,7 @@ function collect(){
     noteColors:[...document.querySelectorAll("[data-note]")].map(el=>el.value),
     pitchLow:+$("pitchLow").value, pitchHigh:+$("pitchHigh").value, reverse:$("reverse").checked,
     source:+$("source").value, gateDb:+$("gateDb").value, fullDb:+$("fullDb").value,
-    releaseMs:+$("releaseMs").value, attackDb:+$("attackDb").value,
+    releaseMs:+$("releaseMs").value, attackDb:+$("attackDb").value, pitchConf:+$("pitchConf").value,
     test:{auto:$("testAuto").checked, level:+$("testLevel").value/100, note:+$("testNote").value}
   };
 }
@@ -327,6 +331,8 @@ async function poll(){
       d.leds.forEach((h,i)=>{const b=s.children[i];b.style.background=h;b.style.boxShadow=`0 0 8px ${h}`;});
       $("meter").style.width=(d.level*100).toFixed(0)+"%";
       $("audioStat").textContent=`${d.db.toFixed(1)} dB · onset ${d.rise.toFixed(1)} dB · ${d.attacks} attacks`;
+      $("pitchNow").textContent=d.note>=0
+        ?`${name(d.note)} ${d.cents>=0?"+":""}${Math.round(d.cents)}¢ · ${Math.round(d.conf*100)}%`:"–";
       if(lastAttacks!==null&&d.attacks!==lastAttacks){
         const a=$("attackDot");a.classList.add("on");setTimeout(()=>a.classList.remove("on"),150);
       }
@@ -441,16 +447,17 @@ static void handlePreset() {
 
 static void handleLeds() {
   String out;
-  out.reserve(ledCount * 10 + 100);
+  out.reserve(ledCount * 10 + 160);
   out += "{\"leds\":[";
-  char b[100];
+  char b[160];
   for (uint16_t i = 0; i < ledCount; i++) {
     snprintf(b, sizeof(b), "%s\"#%02x%02x%02x\"", i ? "," : "", ledBuf[i].r, ledBuf[i].g, ledBuf[i].b);
     out += b;
   }
   const AudioDsp::Snapshot d = AudioDsp::snapshot();
-  snprintf(b, sizeof(b), "],\"level\":%.3f,\"db\":%.1f,\"rise\":%.1f,\"attacks\":%u}",
-           d.level, d.db, d.rise, (unsigned)d.attacks);
+  snprintf(b, sizeof(b),
+           "],\"level\":%.3f,\"db\":%.1f,\"rise\":%.1f,\"attacks\":%u,\"note\":%d,\"cents\":%.1f,\"conf\":%.2f}",
+           d.level, d.db, d.rise, (unsigned)d.attacks, d.pitchValid ? d.note : -1, d.cents, d.confidence);
   out += b;
   server.send(200, "application/json", out);
 }

@@ -888,7 +888,7 @@ Effects (the number is what saved settings store; new effects are only ever appe
 
 Notes:
 
-- Effects that color by note use the **static color** while no pitch is known (until Phase 4, pitch only exists with the simulated guitar). Peak flash uses white. Sustain keeps the last note color through its fade.
+- Effects that color by note use the **static color** while no pitch is known. Peak flash uses white. Sustain keeps the last note color through its fade.
 - Everything with a direction respects **Reverse**.
 - The page dims the Speed, Trail and Static color rows when the selected effect does not use them.
 - Pitch direction caps band speed so a note jump does not alias into backwards motion, and ignores pitch changes under 1.5 semitones/s so vibrato does not read as movement.
@@ -927,7 +927,7 @@ Neon     ff00ff 00ffff aaff00 ff0080 00ff80 ffff00 8000ff 00aaff ff5500 ff00aa 0
 
 The preset table lives in firmware (`src/Presets.cpp`, name + partial settings JSON) and is applied through the same settings merge and 2-second deferred save as the web page, so the Phase 8 mode button can cycle presets without a phone. On the page, the **Presets** card sits right below the live preview: tapping a preset applies it, refreshes every control and shows "Preset: name".
 
-The **Audio** panel selects the source (Simulated guitar or Guitar input on GPIO34), shows a live level meter with an attack indicator, and sets the noise gate, full scale, release time and attack threshold (see Audio Analysis below).
+The **Audio** panel selects the source (Simulated guitar or Guitar input on GPIO34), shows a live level meter with an attack indicator and a pitch readout (note, cents, confidence), and sets the noise gate, full scale, release time, attack threshold and pitch confidence (see Audio Analysis below).
 
 The **Simulated guitar** panel drives the simulated source: **Auto-play** picks notes with varied strength, slides and rests; with auto-play off, choosing a note picks it at the set **pick strength**, and **Pluck** picks again.
 
@@ -939,7 +939,7 @@ API (JSON):
 GET  /api/config   current settings
 POST /api/config   partial or full update, applied live
 POST /api/reset    restore defaults
-GET  /api/leds     {"leds": [...], "level", "db", "rise", "attacks"}: LED colors (LED 0 first) + audio level
+GET  /api/leds     {"leds": [...], "level", "db", "rise", "attacks", "note", "cents", "conf"}: LED colors (LED 0 first), audio level and pitch
 POST /api/pluck    pick the simulated guitar once
 GET  /api/adc      guitar input stats + latest 512 samples
 POST /api/tone?on=1|0   DAC test tone on GPIO26
@@ -958,7 +958,7 @@ presets  list the presets
 preset N apply preset N (deferred save, like the web page)
 leds     print the LED buffer as hex, LED 0 first
 pluck    pick the simulated guitar once
-feat     audio features: level, dB, onset, attack count, pitch
+feat     audio features: level, dB, onset, attacks, pitch (note, cents, confidence), simulator truth, DSP CPU %
 adc      guitar input statistics
 scope    latest 512 raw ADC samples
 tone on / tone off   DAC test tone on GPIO26
@@ -977,16 +977,19 @@ Firmware notes:
 
 ---
 
-# Audio Analysis (Phase 2 and 3)
+# Audio Analysis (Phases 2-4)
 
 ```text
 AudioInput (I2S ADC on GPIO34, or GuitarSynth)  ->  DC removal
-   -> AudioDsp:  EnvelopeDetector  -> dB -> 0..1 level   (Phase 2)
-                 AttackDetector    -> attack events      (Phase 3)
+   -> AudioDsp -> AudioAnalyzer:
+        EnvelopeDetector -> dB -> 0..1 level          (Phase 2)
+        AttackDetector   -> attack events             (Phase 3)
+        PitchDetector    -> YIN estimate every 16 ms  (Phase 4)
+        PitchTracker     -> steady note, cents, hold  (Phase 4)
    -> AudioFeatures -> EffectEngine
 ```
 
-The DSP classes live in `lib/dsp/` as plain C++ (no Arduino), so the same code runs on the ESP32 and in host unit tests.
+The DSP classes live in `lib/dsp/` as plain C++ (no Arduino). `AudioAnalyzer` holds the whole chain, so the ESP32 and the host unit tests run exactly the same code; `src/AudioDsp` is a thin wrapper that adds thread-safe snapshots and CPU timing.
 
 ## Phase 2: VU level
 
@@ -1003,9 +1006,46 @@ A guitar note is a stack of harmonics, and re-picking a ringing string often bar
 - Fires above the **attack threshold** (default 6 dB) when the level is above the noise gate; re-arms below a third of the threshold; 60 ms refractory period. Attack strength = level at the attack.
 - Envelopes, not raw per-hop energy: a 4 ms hop is shorter than one period of low E (12 ms), so raw energy swings several dB with wave phase and re-triggers on a single note.
 
+## Phase 4: Pitch detection
+
+Real notes are stacks of harmonics, and on low strings the 2nd or 3rd harmonic is often louder than the fundamental. A "strongest FFT peak" detector would then report the note an octave or more too high. **YIN** instead finds the shortest lag at which the whole waveform repeats. Each harmonic repeats sooner on its own, but their sum only repeats at the true period, so YIN reports the played note even with a weak or missing fundamental.
+
+`PitchDetector` (YIN), every 16 ms on the latest ~38 ms of signal:
+
+1. difference function over a 384-sample (24 ms) window, lags for 70-1400 Hz (drop D up to the 24th fret on high E)
+2. cumulative mean normalization (no false dips at tiny lags)
+3. first lag whose normalized difference dips below the threshold, walked down to its minimum
+4. parabolic interpolation for sub-sample precision
+
+The normalized difference at that lag is the aperiodicity: 1 - aperiodicity is the confidence. The **pitch confidence** setting (default 85%) is the YIN threshold. YIN only runs while the level is above the noise gate.
+
+`PitchTracker` turns raw estimates into a steady note for the LEDs:
+
+- moves of up to 1 semitone per frame (vibrato, bends, slides) are followed with light smoothing (25 ms)
+- a bigger jump (new note, or a one-frame glitch in a pick transient) must agree over 2 frames before it is accepted
+- the reported note has 15 cents of hysteresis: it changes only when the pitch is more than 65 cents away, so an out-of-tune note or a wobble across a boundary does not flicker
+- when estimates stop (decay, noise), the last note is held for 150 ms
+- outputs: valid, continuous MIDI pitch, steady note, cents, frequency, confidence (readme `PitchState`)
+
+Effects color by the steady note. Pitch is confirmed ~30-60 ms after the pick that starts a note, so when a new note is confirmed within 150 ms of an attack, the ripple, comet or flash that attack spawned is recolored to the new note.
+
+Measured:
+
+| | Result |
+|---|---|
+| Host tests, open strings and chromatic E2-E5 | correct note, within 0.1 cents on clean tones |
+| Host tests, weak or missing fundamental | correct note, no octave errors |
+| Host tests, stiff strings (inharmonicity 1e-4) | correct note, reads up to ~7 cents sharp right after the pick, settling to ~1 cent: the sharp overtones are strongest early. 2e-4: up to ~13 cents |
+| Board, simulated guitar auto-play, steady notes | 305/305 correct, 0 octave errors |
+| Board, time to show a new note | median 43 ms, 90% within 67 ms (target < 100 ms) |
+| Board, manual notes E2-E6 at soft and hard pick | 20/20 correct |
+| Board, audio task CPU (all DSP) | ~19% of one core (YIN unrolled into 4 accumulators, -O2) |
+
+Two notes ringing at once (a chord, or a previous string still ringing) are out of scope: the tracker reports one of the played notes or holds the last one, and never invents a third.
+
 ## Simulated guitar (mock source)
 
-`GuitarSynth` replaces the ADC samples when Source = Simulated guitar, so the whole chain runs exactly as it will with the real guitar. It produces what GPIO34 would see through the MCP6022 buffer: a plucked string (`lib/dsp/PluckSynth`, 16 harmonics with faster decay for higher ones, pick noise, pick restarts the string from rest) on the 1.65V bias, plus ADC noise and 50 Hz hum. Pitch detection is Phase 4; until then the simulated guitar passes through the note it is playing so pitch effects keep working. With Guitar input selected, pitch effects stay idle until Phase 4.
+`GuitarSynth` replaces the ADC samples when Source = Simulated guitar, so the whole chain runs exactly as it will with the real guitar. It produces what GPIO34 would see through the MCP6022 buffer: a plucked string (`lib/dsp/PluckSynth`, 16 harmonics with faster decay for higher ones, pick noise, pick restarts the string from rest) on the 1.65V bias, plus ADC noise and 50 Hz hum. Pitch is detected from these samples like from the guitar; the note the simulator is playing is only reported alongside (`truth` in the serial `feat` output) to check detection.
 
 ## Host unit tests
 
@@ -1023,12 +1063,26 @@ pio test -e native
 - sustained note, slide, vibrato: no extra attacks
 - level falls within 0.8 s of muting
 
-## Phase 2 and 3 test procedure (with the guitar)
+`test/test_pitch` runs the same way through `AudioAnalyzer`:
 
-1. Source = Guitar input. With the guitar volume down, the level meter should stay empty. If not, raise the noise gate until it does.
+- open strings, chromatic E2-E5, top of the neck up to E6
+- weak fundamental (1st harmonic at 10%) and missing fundamental: no octave errors
+- stiff strings (inharmonicity 1e-4 and 2e-4)
+- notes 40 cents sharp or flat keep their name
+- loud noise: no pitch
+- latency from silence < 100 ms, note change < 90 ms with no wrong notes in between
+- vibrato: no note flicker; slide: notes in order
+- two strings ringing: no invented notes
+- pitch drops after muting
+
+## Phase 2-4 test procedure (with the guitar)
+
+1. Source = Guitar input. With the guitar volume down, the level meter should stay empty and Pitch should show "–". If not, raise the noise gate until it does.
 2. Play softly, then hard. Soft playing should light a few LEDs (VU meter effect), hard playing most of them. Adjust full scale so your hardest playing just reaches the top.
 3. Pick single notes: the attack dot should flash once per pick. Let a note ring: no extra flashes. If picks are missed, lower the attack threshold; if a ringing note flashes, raise it.
 4. Fast picking on one string: one flash per pick.
+5. Play each open string and compare the Pitch readout with a tuner app: same note, cents within a few cents (a little sharp right after the pick on wound strings is normal).
+6. Play single fretted notes up the neck: the readout follows without flickering. Slow vibrato should not change the note. If notes drop out on soft playing, lower pitch confidence a little; if the readout jumps around on messy notes, raise it.
 
 ---
 

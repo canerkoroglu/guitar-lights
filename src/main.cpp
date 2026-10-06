@@ -119,9 +119,10 @@ static void handleSerial() {
     } else if (line == "feat") {
       const AudioDsp::Snapshot d = AudioDsp::snapshot();
       Serial.printf("feat level=%.3f db=%.1f rise=%.1f attacks=%u strength=%.2f "
-                    "pitch=%d midi=%.2f vel=%.1f\n",
+                    "pitch=%d note=%d midi=%.2f cents=%.1f conf=%.2f vel=%.1f truth=%.2f cpu=%.1f\n",
                     d.level, d.db, d.rise, (unsigned)d.attacks, d.attackStrength,
-                    d.pitchValid, d.midi, d.velocity);
+                    d.pitchValid, d.note, d.midi, d.cents, d.confidence, d.velocity,
+                    d.truthMidi, d.cpu);
     } else if (line == "adc") {
       printAdc();
     } else if (line == "scope") {
@@ -199,6 +200,7 @@ void loop() {
     audio.attackStrength = d.attackStrength;
     audio.pitchValid     = d.pitchValid;
     audio.midiNote       = d.midi;
+    audio.note           = d.note;
     audio.pitchVelocity  = d.velocity;
     seenAttacks = d.attacks;
 
@@ -210,8 +212,8 @@ void loop() {
   if (now - lastBeat >= HEARTBEAT_MS) {
     lastBeat = now;
     const AudioInput::Stats a = AudioInput::stats();
-    Serial.printf("[hb] up=%lus clients=%d heap=%u | adc %.0fHz dc=%.2fV p2p=%.3fV clip=%u\n",
+    Serial.printf("[hb] up=%lus clients=%d heap=%u | adc %.0fHz dc=%.2fV p2p=%.3fV clip=%u | dsp %.1f%%\n",
                   now / 1000UL, WiFi.softAPgetStationNum(), ESP.getFreeHeap(),
-                  a.sampleRate, a.dcV, a.p2pV, (unsigned)a.clipped);
+                  a.sampleRate, a.dcV, a.p2pV, (unsigned)a.clipped, AudioDsp::snapshot().cpu);
   }
 }

@@ -54,6 +54,7 @@ void ConfigStore::setDefaults() {
   g.fullDb      = -6;
   g.releaseMs   = 120;
   g.attackDb    = 6;
+  g.pitchConf   = 85;
 
   g.testAuto  = true;
   g.testLevel = 0.7f;
@@ -106,6 +107,7 @@ String ConfigStore::toJson() {
   doc["fullDb"]    = g.fullDb;
   doc["releaseMs"] = g.releaseMs;
   doc["attackDb"]  = g.attackDb;
+  doc["pitchConf"] = g.pitchConf;
 
   JsonObject t = doc["test"].to<JsonObject>();
   t["auto"]  = g.testAuto;
@@ -147,6 +149,7 @@ bool ConfigStore::fromJson(const String& body, String& err) {
   if (!doc["fullDb"].isNull())    g.fullDb      = constrain(doc["fullDb"].as<int>(), -40, 0);
   if (!doc["releaseMs"].isNull()) g.releaseMs   = constrain(doc["releaseMs"].as<int>(), 20, 1000);
   if (!doc["attackDb"].isNull())  g.attackDb    = constrain(doc["attackDb"].as<int>(), 2, 30);
+  if (!doc["pitchConf"].isNull()) g.pitchConf   = constrain(doc["pitchConf"].as<int>(), 50, 99);
   if (g.fullDb < g.gateDb + 6)    g.fullDb      = g.gateDb + 6;   // keep a usable range
 
   if (doc["test"].is<JsonObject>()) {
