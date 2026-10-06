@@ -23,6 +23,18 @@ enum EffectMode : uint8_t {
   MODE_PITCH_DIRECTION,
   MODE_NOTE_FLOW,
   MODE_RIPPLE,
+  // Added later, so numbers stay stable. Groups in the web UI:
+  MODE_TWINKLE,        //  9 ambient
+  MODE_SCANNER,        // 10 ambient
+  MODE_OCEAN,          // 11 ambient
+  MODE_LAVA,           // 12 ambient
+  MODE_PEAK_FLASH,     // 13 whole strip (readme Effect 2)
+  MODE_SUSTAIN,        // 14 whole strip (readme Effect 7)
+  MODE_CENTER_VU,      // 15 whole strip
+  MODE_FIRE,           // 16 whole strip
+  MODE_SPARKLE,        // 17 moving
+  MODE_COMET,          // 18 moving
+  MODE_STEP_CHASE,     // 19 moving (readme "rhythm response")
   MODE_COUNT
 };
 
@@ -62,7 +74,9 @@ enum AudioSource : uint8_t {
 
 namespace ConfigStore {
   void      begin();                               // load from NVS (or defaults)
-  void      save();                                // persist current settings
+  void      save();                                // persist current settings now
+  void      requestSave();                         // persist once changes stop for 2 s
+  void      loop();                                // call from loop(): runs the deferred save
   void      setDefaults();                         // reset in-memory to defaults
   Settings& get();                                 // live reference
   String    toJson();                              // serialize current settings

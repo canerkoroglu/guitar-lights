@@ -5,6 +5,13 @@
 static Settings    g;
 static Preferences prefs;
 
+// Changes apply immediately but are written to flash (NVS) only after
+// SAVE_DELAY_MS without further changes. Dragging a slider would otherwise
+// hammer the flash with dozens of writes per second.
+static constexpr uint32_t SAVE_DELAY_MS = 2000;
+static bool     dirty      = false;
+static uint32_t lastChange = 0;
+
 static String toHex(const RGBColor& c) {
   char b[8];
   snprintf(b, sizeof(b), "#%02x%02x%02x", c.r, c.g, c.b);
@@ -65,7 +72,19 @@ void ConfigStore::begin() {
   }
 }
 
-void ConfigStore::save() { prefs.putString("cfg", toJson()); }
+void ConfigStore::save() {
+  prefs.putString("cfg", toJson());
+  dirty = false;
+}
+
+void ConfigStore::requestSave() {
+  dirty      = true;
+  lastChange = millis();
+}
+
+void ConfigStore::loop() {
+  if (dirty && millis() - lastChange >= SAVE_DELAY_MS) save();
+}
 
 String ConfigStore::toJson() {
   JsonDocument doc;

@@ -19,6 +19,7 @@
  * USB serial commands (115200 baud, one per line):
  *   {json}  apply settings, same format as POST /api/config
  *   cfg     print current settings
+ *   presets list the presets;  preset N  apply one
  *   leds    print the LED buffer as hex, LED 0 first
  *   pluck   pick the simulated guitar once
  *   feat    print audio features (level, dB, attacks, pitch)
@@ -44,6 +45,7 @@
 #include "TestTone.h"
 #include "EffectEngine.h"
 #include "WebPortal.h"
+#include "Presets.h"
 
 // ---- Hardware ----
 static constexpr uint8_t  LED_DATA_PIN = 18;   // GPIO18 -> WS2812B DIN
@@ -100,6 +102,12 @@ static void handleSerial() {
       }
     } else if (line == "cfg") {
       Serial.println(ConfigStore::toJson());
+    } else if (line == "presets") {
+      for (size_t i = 0; i < Presets::count(); i++) Serial.printf("%u %s\n", (unsigned)i, Presets::name(i));
+    } else if (line.startsWith("preset ")) {
+      const size_t i = (size_t)line.substring(7).toInt();
+      if (Presets::apply(i)) Serial.printf("preset %s\n", Presets::name(i));
+      else                   Serial.println(F("error no such preset"));
     } else if (line == "leds") {
       for (uint16_t i = 0; i < NUM_LEDS; i++) {
         Serial.printf("%02x%02x%02x ", leds[i].r, leds[i].g, leds[i].b);
@@ -125,7 +133,7 @@ static void handleSerial() {
       TestTone::set(line == "tone on");
       Serial.println(F("ok"));
     } else if (line.length()) {
-      Serial.println(F("commands: {json} | cfg | leds | pluck | feat | adc | scope | tone on | tone off"));
+      Serial.println(F("commands: {json} | cfg | presets | preset N | leds | pluck | feat | adc | scope | tone on | tone off"));
     }
     line = "";
   }
@@ -171,6 +179,7 @@ void setup() {
 void loop() {
   webPortalLoop();
   handleSerial();
+  ConfigStore::loop();   // deferred settings save
 
   const uint32_t now = millis();
   static uint32_t lastFrame = 0;

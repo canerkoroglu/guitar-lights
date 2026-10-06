@@ -861,19 +861,71 @@ URL           : http://192.168.4.1/   (or http://guitar.local/ on macOS/iOS)
 
 The page shows a live preview of the 16 LEDs and controls power, brightness, effect, speed, trail length, static color, a **note → color** table (12 pitch classes, C to B, any octave), and the **pitch → position** range (lowest/highest note on the strip, plus a reverse switch for how the strip is mounted). Mappings are per single note, not per chord, because chord recognition is out of scope.
 
-Effects:
+Effects (the number is what saved settings store; new effects are only ever appended):
 
-| Group | Effect | Behaviour |
-|---|---|---|
-| Ambient | Static color, Rainbow, Breathing | No audio needed |
-| Whole strip | VU meter | Lit LED count follows level |
-| Whole strip | Pitch color | All LEDs take the current note's color |
-| Moving | Pitch position | Dot at the note's place between lowest and highest note, with a trail (readme Effect 4) |
-| Moving | Pitch direction | Bands travel up while pitch rises, down while it falls, still on a steady note (readme Effect 5) |
-| Moving | Note flow | Each note's color enters at one end and scrolls along the strip |
-| Moving | Ripple | Each pick sends pulses outward from the note's position |
+| # | Group | Effect | Behaviour |
+|---|---|---|---|
+| 0 | Ambient | Static color | One color on every LED |
+| 1 | Ambient | Rainbow | Scrolling rainbow. Speed |
+| 2 | Ambient | Breathing | Static color fading in and out. Speed |
+| 9 | Ambient | Twinkle | Random LEDs light in the static color (blended toward white) and fade. Speed = stars per second (~1-21), Trail = glow time |
+| 10 | Ambient | Scanner | One smooth dot in the static color bounces end to end with a fading tail. Speed = sweep rate, Trail = tail |
+| 11 | Ambient | Ocean | FastLED ocean palette drifting along the strip with a slow shimmer. Speed = drift |
+| 12 | Ambient | Lava | FastLED lava palette drifting along the strip with a slow shimmer. Speed = drift |
+| 3 | Whole strip | VU meter | Lit LED count follows level (readme Effect 1) |
+| 4 | Whole strip | Pitch color | All LEDs take the current note's color (readme Effect 3) |
+| 15 | Whole strip | Center VU | Level bar grows from the middle to both ends, soft edge, green centre to red ends |
+| 13 | Whole strip | Peak flash | VU meter plus a mostly white flash (slightly tinted by the note) on each attack, strength max(0.35, attack strength), fading in ~120 ms (readme Effect 2) |
+| 14 | Whole strip | Sustain | Whole strip in the note color: full on a pick, follows the level while the note rings, then fades. Trail = fade time (~0.1-2 s) (readme Effect 7) |
+| 16 | Whole strip | Fire | Fire2012-style flames rising from LED 0. Sparking grows with level, attacks add heat at the base, embers when silent. Trail = flame height |
+| 5 | Moving | Pitch position | Dot at the note's place between lowest and highest note, with a trail (readme Effect 4) |
+| 6 | Moving | Pitch direction | Bands travel up while pitch rises, down while it falls, still on a steady note (readme Effect 5) |
+| 7 | Moving | Note flow | Each note's color enters at one end and scrolls along the strip |
+| 8 | Moving | Ripple | Each pick sends pulses outward from the note's position |
+| 17 | Moving | Sparkle | Each attack lights 2-10 random LEDs (more for harder picks) in the note color blended toward white; a ringing note adds occasional dimmer sparks. Trail = fade |
+| 18 | Moving | Comet | Each attack launches a comet from LED 0 in the note color, up to 4 at once. Speed x pick strength = comet speed, Trail = tail |
+| 19 | Moving | Step chase | Each attack moves a 4-LED block one block along the strip with a ~60 ms glide, wrapping around. Brightness follows the level, Trail = fade (readme "rhythm response") |
 
-Pitch direction caps band speed so a note jump does not alias into backwards motion, and ignores pitch changes under 1.5 semitones/s so vibrato does not read as movement.
+Notes:
+
+- Effects that color by note use the **static color** while no pitch is known (until Phase 4, pitch only exists with the simulated guitar). Peak flash uses white. Sustain keeps the last note color through its fade.
+- Everything with a direction respects **Reverse**.
+- The page dims the Speed, Trail and Static color rows when the selected effect does not use them.
+- Pitch direction caps band speed so a note jump does not alias into backwards motion, and ignores pitch changes under 1.5 semitones/s so vibrato does not read as movement.
+- Fire's cooling and sparking ranges were tuned for 16 LEDs by simulating the heat model: Fire2012's defaults (made for ~30 LEDs) flood a short strip with heat at high level.
+
+## Presets
+
+A preset is a one-tap look. It sets only the **effect, speed, trail, static color and note colors**. It never changes power, brightness, pitch range, Reverse, the audio source, noise gate / full scale / release / attack threshold, or the simulated-guitar settings.
+
+| # | Preset | Effect | Speed | Trail | Colors |
+|---|---|---|---|---|---|
+| 0 | Classic VU | VU meter | 50 | 50 | Rainbow |
+| 1 | Rainbow notes | Pitch color | 50 | 50 | Rainbow |
+| 2 | Melody trail | Pitch position | 50 | 85 | Rainbow |
+| 3 | Slide | Pitch direction | 60 | 40 | Neon |
+| 4 | Blues | Note flow | 30 | 80 | Ice |
+| 5 | Stage | Ripple | 75 | 30 | Neon |
+| 6 | Metal | Ripple | 95 | 15 | Fire |
+| 7 | Chill | Breathing | 15 | 50 | static #ff8c1a |
+| 8 | Party | Rainbow | 80 | 50 | - |
+| 9 | Campfire | Fire | 50 | 70 | - |
+| 10 | Night ocean | Ocean | 20 | 50 | - |
+| 11 | Strobe | Peak flash | 50 | 50 | Neon |
+| 12 | Fireworks | Sparkle | 50 | 40 | Neon |
+| 13 | Rhythm | Step chase | 50 | 50 | Neon |
+| 14 | Starry night | Twinkle | 30 | 80 | static #b0c8ff |
+
+Note color sets (C to B):
+
+```text
+Rainbow  ff0000 ff7f00 ffff00 7fff00 00ff00 00ff7f 00ffff 007fff 0000ff 7f00ff ff00ff ff007f
+Fire     ff0000 ff2200 ff4800 ff6a00 ff8c00 ffb200 ffd400 ffb200 ff8c00 ff6a00 ff4800 ff2200
+Ice      00ffff 00d4ff 00aaff 007fff 0055ff 002aff 0000ff 002aff 0055ff 007fff 00aaff 00d4ff
+Neon     ff00ff 00ffff aaff00 ff0080 00ff80 ffff00 8000ff 00aaff ff5500 ff00aa 00ff00 0055ff
+```
+
+The preset table lives in firmware (`src/Presets.cpp`, name + partial settings JSON) and is applied through the same settings merge and 2-second deferred save as the web page, so the Phase 8 mode button can cycle presets without a phone. On the page, the **Presets** card sits right below the live preview: tapping a preset applies it, refreshes every control and shows "Preset: name".
 
 The **Audio** panel selects the source (Simulated guitar or Guitar input on GPIO34), shows a live level meter with an attack indicator, and sets the noise gate, full scale, release time and attack threshold (see Audio Analysis below).
 
@@ -891,6 +943,8 @@ GET  /api/leds     {"leds": [...], "level", "db", "rise", "attacks"}: LED colors
 POST /api/pluck    pick the simulated guitar once
 GET  /api/adc      guitar input stats + latest 512 samples
 POST /api/tone?on=1|0   DAC test tone on GPIO26
+GET  /api/presets  {"presets": ["Classic VU", ...]}
+POST /api/preset?i=N    apply preset N, returns the full settings JSON
 ```
 
 The **Guitar input** panel shows a live oscilloscope of GPIO34, DC level, peak-to-peak, RMS, measured sample rate, and a status: OK, No signal, Bias off, Clipping, or Test tone.
@@ -900,6 +954,8 @@ USB serial commands (115200 baud, one per line), for configuring and testing wit
 ```text
 {json}   apply settings, same format as POST /api/config (saved immediately)
 cfg      print current settings
+presets  list the presets
+preset N apply preset N (deferred save, like the web page)
 leds     print the LED buffer as hex, LED 0 first
 pluck    pick the simulated guitar once
 feat     audio features: level, dB, onset, attack count, pitch
@@ -1144,7 +1200,7 @@ Possible future additions:
 - Wi-Fi configuration page
 - Mobile app
 - OTA firmware update
-- Preset storage
+- Saving your own presets (15 built-in presets exist, see Presets)
 - User-defined color palettes
 - MIDI output
 - Tuner mode

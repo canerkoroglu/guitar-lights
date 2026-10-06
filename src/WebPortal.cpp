@@ -5,17 +5,11 @@
 #include "GuitarSynth.h"
 #include "AudioInput.h"
 #include "TestTone.h"
+#include "Presets.h"
 
 static WebServer   server(80);
 static const CRGB* ledBuf   = nullptr;
 static uint16_t    ledCount = 0;
-
-// Changes apply to the LEDs immediately, but are written to flash (NVS)
-// only after the UI has been idle for SAVE_DELAY_MS. Dragging a slider
-// would otherwise hammer the flash with dozens of writes per second.
-static constexpr uint32_t SAVE_DELAY_MS = 2000;
-static bool     dirty      = false;
-static uint32_t lastChange = 0;
 
 static const char INDEX_HTML[] PROGMEM = R"rawhtml(<!doctype html>
 <html lang="en"><head>
@@ -64,6 +58,10 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
 .dot{width:12px;height:12px;border-radius:50%;background:var(--line);flex:none;transition:background .15s}
 .dot.on{background:#fff;box-shadow:0 0 10px #fff}
 .row small{color:var(--fg);margin-left:8px}
+.row.dim{opacity:.35}
+.presets{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:6px 0 14px}
+.presets button{padding:10px 4px;font-size:13px;background:#232836;border:1px solid var(--line)}
+.presets button.on{background:var(--acc);border-color:var(--acc)}
 @media (max-width:420px){.notes{grid-template-columns:repeat(4,1fr)}}
 </style></head><body>
 <h1>Guitar RGB</h1>
@@ -72,6 +70,11 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
 <div class="card">
   <h2>Live</h2>
   <div class="strip" id="strip"></div>
+</div>
+
+<div class="card">
+  <h2>Presets</h2>
+  <div class="presets" id="presets"></div>
 </div>
 
 <details class="card" id="inputCard">
@@ -94,16 +97,27 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
         <option value="0">Static color</option>
         <option value="1">Rainbow</option>
         <option value="2">Breathing</option>
+        <option value="9">Twinkle</option>
+        <option value="10">Scanner</option>
+        <option value="11">Ocean</option>
+        <option value="12">Lava</option>
       </optgroup>
       <optgroup label="Whole strip (audio)">
         <option value="3">VU meter</option>
         <option value="4">Pitch color</option>
+        <option value="15">Center VU</option>
+        <option value="13">Peak flash</option>
+        <option value="14">Sustain</option>
+        <option value="16">Fire</option>
       </optgroup>
       <optgroup label="Moving along strip (audio)">
         <option value="5">Pitch position</option>
         <option value="6">Pitch direction</option>
         <option value="7">Note flow</option>
         <option value="8">Ripple</option>
+        <option value="17">Sparkle</option>
+        <option value="18">Comet</option>
+        <option value="19">Step chase</option>
       </optgroup>
     </select></div>
   <p class="hint" id="desc"></p>
@@ -167,8 +181,21 @@ const DESC=[
   "A dot sits where the note falls between the lowest and highest note, leaving a trail as you move.",
   "Bands travel up the strip as pitch rises and down as it falls. Holds still on a steady note.",
   "Each note's color enters at one end and scrolls along, showing what you just played.",
-  "Each pick sends pulses outward from the note's position."
+  "Each pick sends pulses outward from the note's position.",
+  "Random LEDs light in the static color and fade, like stars. Speed: how many. Trail: how long they glow.",
+  "One dot in the static color sweeps end to end with a fading tail.",
+  "Blues and greens drifting slowly along the strip.",
+  "Reds and oranges drifting slowly along the strip.",
+  "VU meter, plus a white flash on every pick.",
+  "Whole strip in the note color: bright on a pick, follows the ringing note, then fades. Trail: fade time.",
+  "Level bar grows from the middle out to both ends.",
+  "Flames rise from the start of the strip; playing and picks feed the fire. Trail: flame height.",
+  "Each pick lights random LEDs in the note color; harder picks, more sparks.",
+  "Each pick launches a comet in the note color; harder picks fly faster.",
+  "A block of 4 LEDs steps along the strip on every pick."
 ];
+// Which of Speed (s), Trail (t) and Static color (c) each effect uses, by effect number.
+const USES=["c","s","sc","","","t","st","st","st","stc","stc","s","s","","tc","","t","tc","stc","tc"];
 const $=id=>document.getElementById(id);
 const name=m=>NOTES[m%12]+(Math.floor(m/12)-1);
 const range=(a,b)=>{let s="";for(let m=a;m<=b;m++)s+=`<option value="${m}">${name(m)}</option>`;return s;};
@@ -180,7 +207,14 @@ $("pitchLow").innerHTML=range(28,95);
 $("pitchHigh").innerHTML=range(29,96);
 $("testNote").innerHTML='<option value="-1">none</option>'+range(28,96);
 
-function desc(){$("desc").textContent=DESC[+$("mode").value]||"";}
+// Effect description, and dim the rows the effect ignores.
+function desc(){
+  const m=+$("mode").value, u=USES[m]||"";
+  $("desc").textContent=DESC[m]||"";
+  $("speed").closest(".row").classList.toggle("dim",!u.includes("s"));
+  $("trail").closest(".row").classList.toggle("dim",!u.includes("t"));
+  $("staticColor").closest(".row").classList.toggle("dim",!u.includes("c"));
+}
 
 function fill(c){
   $("power").checked=c.power;
@@ -254,6 +288,7 @@ function onEdit(e){
   if(e.target===$("gateDb")||e.target===$("fullDb"))fixDb(e.target);
   if(e.target===$("mode"))desc();
   labels();
+  document.querySelectorAll("#presets button.on").forEach(b=>b.classList.remove("on"));
   queue();
 }
 
@@ -261,6 +296,26 @@ async function load(){
   try{fill(await (await fetch("/api/config")).json());status("connected");}
   catch(e){status("connection failed");}
 }
+
+// Presets: one button each. Applying one refreshes every control.
+async function loadPresets(){
+  try{
+    const d=await (await fetch("/api/presets")).json();
+    $("presets").innerHTML=d.presets.map((n,i)=>`<button data-i="${i}">${n}</button>`).join("");
+  }catch(e){}
+}
+$("presets").onclick=async e=>{
+  const b=e.target.closest("button");
+  if(!b)return;
+  clearTimeout(timer);
+  try{
+    const r=await fetch("/api/preset?i="+b.dataset.i,{method:"POST"});
+    if(!r.ok)throw new Error(r.status);
+    fill(await r.json());
+    document.querySelectorAll("#presets button").forEach(x=>x.classList.toggle("on",x===b));
+    status("Preset: "+b.textContent);
+  }catch(err){status("offline");}
+};
 
 // Mirror the real LEDs and the audio level while the page is visible.
 let lastAttacks=null;
@@ -334,6 +389,7 @@ $("reset").onclick=async()=>{
   catch(e){status("offline");}
 };
 load();
+loadPresets();
 poll();
 pollAdc();
 </script>
@@ -349,8 +405,7 @@ static void handleGetConfig() {
 static void handlePostConfig() {
   String err;
   if (ConfigStore::fromJson(server.arg("plain"), err)) {
-    dirty = true;
-    lastChange = millis();
+    ConfigStore::requestSave();
     server.send(200, "application/json", "{\"ok\":true}");
   } else {
     server.send(400, "application/json", String("{\"ok\":false,\"error\":\"") + err + "\"}");
@@ -360,8 +415,28 @@ static void handlePostConfig() {
 static void handleReset() {
   ConfigStore::setDefaults();
   ConfigStore::save();
-  dirty = false;
   server.send(200, "application/json", ConfigStore::toJson());
+}
+
+static void handlePresets() {
+  String out = "{\"presets\":[";
+  for (size_t i = 0; i < Presets::count(); i++) {
+    if (i) out += ',';
+    out += '"';
+    out += Presets::name(i);
+    out += '"';
+  }
+  out += "]}";
+  server.send(200, "application/json", out);
+}
+
+static void handlePreset() {
+  const String i = server.arg("i");
+  if (i.length() && Presets::apply((size_t)i.toInt())) {
+    server.send(200, "application/json", ConfigStore::toJson());
+  } else {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"no such preset\"}");
+  }
 }
 
 static void handleLeds() {
@@ -425,14 +500,10 @@ void webPortalBegin(const CRGB* leds, uint16_t numLeds) {
   server.on("/api/pluck",  HTTP_POST, handlePluck);
   server.on("/api/adc",    HTTP_GET,  handleAdc);
   server.on("/api/tone",   HTTP_POST, handleTone);
+  server.on("/api/presets", HTTP_GET, handlePresets);
+  server.on("/api/preset", HTTP_POST, handlePreset);
   server.onNotFound(handleRoot);   // any other path shows the UI
   server.begin();
 }
 
-void webPortalLoop() {
-  server.handleClient();
-  if (dirty && millis() - lastChange >= SAVE_DELAY_MS) {
-    ConfigStore::save();
-    dirty = false;
-  }
-}
+void webPortalLoop() { server.handleClient(); }
