@@ -1,8 +1,7 @@
 /*
  * EffectEngine.h — renders LED frames from Settings + AudioFeatures.
  *
- * The engine never reads the ADC. It consumes AudioFeatures, which come
- * from AudioSim today and from the real DSP layer in Phase 2/4.
+ * The engine never reads the ADC. It consumes AudioFeatures from AudioDsp.
  */
 #pragma once
 #include <FastLED.h>

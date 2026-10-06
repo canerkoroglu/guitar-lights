@@ -1,9 +1,9 @@
 /*
  * AudioFeatures.h — what the audio layer tells the effect engine each frame.
  *
- * Subset of the AudioFeatures model in readme.md. Produced by AudioSim for
- * now; the real ADC + DSP pipeline (Phase 1-4) will fill the same struct,
- * so effects do not change when real guitar input arrives.
+ * Subset of the AudioFeatures model in readme.md, filled each frame from
+ * AudioDsp. The same struct is produced whether the source is the real
+ * guitar input or the simulated guitar, so effects never change.
  */
 #pragma once
 

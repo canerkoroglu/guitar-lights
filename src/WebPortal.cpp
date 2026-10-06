@@ -1,7 +1,10 @@
 #include "WebPortal.h"
 #include <WebServer.h>
 #include "Config.h"
-#include "AudioSim.h"
+#include "AudioDsp.h"
+#include "GuitarSynth.h"
+#include "AudioInput.h"
+#include "TestTone.h"
 
 static WebServer   server(80);
 static const CRGB* ledBuf   = nullptr;
@@ -49,6 +52,18 @@ button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)
 .sw i:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
 .sw input:checked+i{background:var(--acc)}
 .sw input:checked+i:before{transform:translateX(20px)}
+details.card>summary{display:flex;justify-content:space-between;align-items:center;cursor:pointer;list-style:none}
+details.card>summary::-webkit-details-marker{display:none}
+details.card>summary::after{content:"\25B8";color:var(--mut)}
+details.card[open]>summary::after{content:"\25BE"}
+canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8px;margin:6px 0}
+.chip{font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;background:var(--line)}
+.chip.ok{background:#1f5f3a}.chip.bad{background:#7a2530}.chip.info{background:#2c3f7a}
+.meter{flex:1;position:relative;height:12px;background:#0b0c10;border-radius:6px;overflow:hidden}
+.meter i{position:absolute;left:0;top:0;bottom:0;width:0;background:linear-gradient(90deg,#1f9d55,#e3b341 70%,#d1453b);transition:width .1s}
+.dot{width:12px;height:12px;border-radius:50%;background:var(--line);flex:none;transition:background .15s}
+.dot.on{background:#fff;box-shadow:0 0 10px #fff}
+.row small{color:var(--fg);margin-left:8px}
 @media (max-width:420px){.notes{grid-template-columns:repeat(4,1fr)}}
 </style></head><body>
 <h1>Guitar RGB</h1>
@@ -58,6 +73,16 @@ button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)
   <h2>Live</h2>
   <div class="strip" id="strip"></div>
 </div>
+
+<details class="card" id="inputCard">
+  <summary><h2>Guitar input (GPIO34)</h2></summary>
+  <canvas id="scope"></canvas>
+  <p class="hint" id="adcStat">Waiting for samples&hellip;</p>
+  <div class="row"><span>Status</span><b class="chip" id="adcState">&ndash;</b></div>
+  <div class="row"><span>Zoom to signal</span><label class="sw"><input type="checkbox" id="zoom" data-local checked><i></i></label></div>
+  <div class="row"><span>Test tone on GPIO26</span><label class="sw"><input type="checkbox" id="tone" data-local><i></i></label></div>
+  <p class="hint">Loopback test: jumper GPIO26 to GPIO34 with nothing else on GPIO34. Remove the jumper before wiring the buffer circuit.</p>
+</details>
 
 <div class="card">
   <h2>Output</h2>
@@ -102,12 +127,28 @@ button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)
 </div>
 
 <div class="card">
-  <h2>Test / simulate</h2>
-  <p class="hint">No guitar input yet. Auto plays random notes with slides. Turn it off to hold a note yourself.</p>
+  <h2>Audio</h2>
+  <div class="row"><span>Source</span>
+    <select id="source">
+      <option value="0">Simulated guitar</option>
+      <option value="1">Guitar input (GPIO34)</option>
+    </select></div>
+  <div class="row"><span>Level</span><div class="meter"><i id="meter"></i></div><b class="dot" id="attackDot" title="attack"></b></div>
+  <p class="hint" id="audioStat">&ndash;</p>
+  <div class="row"><span>Noise gate<small id="gateDbV"></small></span><input type="range" id="gateDb" min="-80" max="-10"></div>
+  <div class="row"><span>Full scale<small id="fullDbV"></small></span><input type="range" id="fullDb" min="-40" max="0"></div>
+  <div class="row"><span>Release<small id="releaseMsV"></small></span><input type="range" id="releaseMs" min="20" max="1000" step="10"></div>
+  <div class="row"><span>Attack threshold<small id="attackDbV"></small></span><input type="range" id="attackDb" min="2" max="30"></div>
+  <p class="hint">Noise gate: anything quieter counts as silence. Full scale: this loud lights every LED. Release: how fast the level falls. Attack threshold: how sharp a jump counts as a pick; lower is more sensitive.</p>
+</div>
+
+<div class="card">
+  <h2>Simulated guitar</h2>
+  <p class="hint">Used when Source is Simulated guitar. Auto-play picks notes with varied strength, slides and rests. Turn it off to pick a note yourself.</p>
   <div class="row"><span>Auto-play</span><label class="sw"><input type="checkbox" id="testAuto"><i></i></label></div>
-  <div class="row"><span>Level</span><input type="range" id="testLevel" min="0" max="100"></div>
+  <div class="row"><span>Pick strength</span><input type="range" id="testLevel" min="0" max="100"></div>
   <div class="row"><span>Note</span><select id="testNote"></select></div>
-  <div class="row"><span>Pick attack</span><button id="pluck">Pluck</button></div>
+  <div class="row"><span>Pick</span><button id="pluck">Pluck</button></div>
 </div>
 
 <div class="btns">
@@ -152,10 +193,23 @@ function fill(c){
   $("pitchLow").value=c.pitchLow;
   $("pitchHigh").value=c.pitchHigh;
   $("reverse").checked=c.reverse;
+  $("source").value=c.source;
+  $("gateDb").value=c.gateDb;
+  $("fullDb").value=c.fullDb;
+  $("releaseMs").value=c.releaseMs;
+  $("attackDb").value=c.attackDb;
   $("testAuto").checked=c.test.auto;
   $("testLevel").value=Math.round(c.test.level*100);
   $("testNote").value=c.test.note;
   desc();
+  labels();
+}
+
+function labels(){
+  $("gateDbV").textContent=$("gateDb").value+" dB";
+  $("fullDbV").textContent=$("fullDb").value+" dB";
+  $("releaseMsV").textContent=$("releaseMs").value+" ms";
+  $("attackDbV").textContent=$("attackDb").value+" dB";
 }
 
 function collect(){
@@ -164,6 +218,8 @@ function collect(){
     speed:+$("speed").value, trail:+$("trail").value, staticColor:$("staticColor").value,
     noteColors:[...document.querySelectorAll("[data-note]")].map(el=>el.value),
     pitchLow:+$("pitchLow").value, pitchHigh:+$("pitchHigh").value, reverse:$("reverse").checked,
+    source:+$("source").value, gateDb:+$("gateDb").value, fullDb:+$("fullDb").value,
+    releaseMs:+$("releaseMs").value, attackDb:+$("attackDb").value,
     test:{auto:$("testAuto").checked, level:+$("testLevel").value/100, note:+$("testNote").value}
   };
 }
@@ -185,9 +241,19 @@ function fixRange(t){
   if(t===hi)lo.value=Math.max(28,+hi.value-1);else hi.value=Math.min(96,+lo.value+1);
 }
 
+// Keep full scale at least 6 dB above the noise gate.
+function fixDb(t){
+  const g=$("gateDb"),f=$("fullDb");
+  if(+f.value>=+g.value+6)return;
+  if(t===f)g.value=Math.max(-80,+f.value-6);else f.value=Math.min(0,+g.value+6);
+}
+
 function onEdit(e){
+  if(e.target.dataset&&"local" in e.target.dataset)return;   // UI-only controls, not settings
   if(e.target===$("pitchLow")||e.target===$("pitchHigh"))fixRange(e.target);
+  if(e.target===$("gateDb")||e.target===$("fullDb"))fixDb(e.target);
   if(e.target===$("mode"))desc();
+  labels();
   queue();
 }
 
@@ -196,20 +262,70 @@ async function load(){
   catch(e){status("connection failed");}
 }
 
-// Mirror the real LEDs while the page is visible.
+// Mirror the real LEDs and the audio level while the page is visible.
+let lastAttacks=null;
 async function poll(){
   if(!document.hidden){
     try{
-      const c=await (await fetch("/api/leds")).json(), s=$("strip");
-      if(s.children.length!==c.length)s.innerHTML="<b></b>".repeat(c.length);
-      c.forEach((h,i)=>{const b=s.children[i];b.style.background=h;b.style.boxShadow=`0 0 8px ${h}`;});
+      const d=await (await fetch("/api/leds")).json(), s=$("strip");
+      if(s.children.length!==d.leds.length)s.innerHTML="<b></b>".repeat(d.leds.length);
+      d.leds.forEach((h,i)=>{const b=s.children[i];b.style.background=h;b.style.boxShadow=`0 0 8px ${h}`;});
+      $("meter").style.width=(d.level*100).toFixed(0)+"%";
+      $("audioStat").textContent=`${d.db.toFixed(1)} dB · onset ${d.rise.toFixed(1)} dB · ${d.attacks} attacks`;
+      if(lastAttacks!==null&&d.attacks!==lastAttacks){
+        const a=$("attackDot");a.classList.add("on");setTimeout(()=>a.classList.remove("on"),150);
+      }
+      lastAttacks=d.attacks;
     }catch(e){}
   }
   setTimeout(poll,150);
 }
 
+// Guitar input scope: polls only while the card is open and the page is visible.
+function drawAdc(d){
+  const cv=$("scope"),dpr=window.devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;
+  if(cv.width!==Math.round(W*dpr)){cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);}
+  const g=cv.getContext("2d");
+  g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,W,H);
+  const s=d.s||[];
+  if(s.length>1){
+    let lo=0,hi=4095;
+    if($("zoom").checked){
+      const mean=s.reduce((a,b)=>a+b,0)/s.length;
+      let dev=64;
+      for(const v of s)dev=Math.max(dev,Math.abs(v-mean)*1.25);
+      lo=mean-dev;hi=mean+dev;
+    }
+    const y=v=>H-(v-lo)/(hi-lo)*H;
+    g.fillStyle="rgba(122,37,48,.45)";   // outside the ADC's accurate range
+    if(d.hi<hi)g.fillRect(0,0,W,Math.max(0,y(d.hi)));
+    if(d.lo>lo){const t=Math.min(H,y(d.lo));g.fillRect(0,t,W,H-t);}
+    g.strokeStyle="#5b8cff";g.lineWidth=1.5;g.beginPath();
+    s.forEach((v,i)=>{const x=i/(s.length-1)*W;i?g.lineTo(x,y(v)):g.moveTo(x,y(v));});
+    g.stroke();
+  }
+  $("adcStat").textContent=`DC ${d.dc.toFixed(3)} V · p-p ${d.p2p.toFixed(3)} V · RMS ${d.rms.toFixed(3)} V · `+
+    `${(d.rate/1000).toFixed(2)} kHz · ${d.zc.toFixed(0)} crossings/s · ${(s.length/Math.max(d.rate,1)*1000).toFixed(0)} ms shown`;
+  let st="OK",cls="ok";
+  if(!d.running){st="ADC not running";cls="bad";}
+  else if(d.clip>0){st=`Clipping (${d.clip} samples)`;cls="bad";}
+  else if(d.tone){st="Test tone";cls="info";}
+  else if(d.dc<1.4||d.dc>1.9){st="Bias off (expect ~1.65 V)";cls="bad";}
+  else if(d.p2p<0.02){st="No signal";cls="info";}
+  const c=$("adcState");c.textContent=st;c.className="chip "+cls;
+  $("tone").checked=d.tone;
+}
+async function pollAdc(){
+  if(!document.hidden&&$("inputCard").open){
+    try{drawAdc(await (await fetch("/api/adc")).json());}catch(e){}
+  }
+  setTimeout(pollAdc,200);
+}
+
 document.addEventListener("input",onEdit);
 document.addEventListener("change",onEdit);
+$("tone").onchange=e=>fetch("/api/tone?on="+(e.target.checked?1:0),{method:"POST"}).catch(()=>status("offline"));
 $("save").onclick=send;
 $("pluck").onclick=()=>fetch("/api/pluck",{method:"POST"}).catch(()=>status("offline"));
 $("reset").onclick=async()=>{
@@ -219,6 +335,7 @@ $("reset").onclick=async()=>{
 };
 load();
 poll();
+pollAdc();
 </script>
 </body></html>
 )rawhtml";
@@ -249,20 +366,51 @@ static void handleReset() {
 
 static void handleLeds() {
   String out;
-  out.reserve(ledCount * 10 + 2);
-  out += '[';
-  char b[12];
+  out.reserve(ledCount * 10 + 100);
+  out += "{\"leds\":[";
+  char b[100];
   for (uint16_t i = 0; i < ledCount; i++) {
     snprintf(b, sizeof(b), "%s\"#%02x%02x%02x\"", i ? "," : "", ledBuf[i].r, ledBuf[i].g, ledBuf[i].b);
     out += b;
   }
-  out += ']';
+  const AudioDsp::Snapshot d = AudioDsp::snapshot();
+  snprintf(b, sizeof(b), "],\"level\":%.3f,\"db\":%.1f,\"rise\":%.1f,\"attacks\":%u}",
+           d.level, d.db, d.rise, (unsigned)d.attacks);
+  out += b;
   server.send(200, "application/json", out);
 }
 
 static void handlePluck() {
-  audioSimPluck();
+  GuitarSynth::pluck();
   server.send(200, "application/json", "{\"ok\":true}");
+}
+
+static void handleAdc() {
+  static uint16_t s[AudioInput::SCOPE_LEN];
+  const AudioInput::Stats a = AudioInput::stats();
+  const size_t n = AudioInput::scope(s, AudioInput::SCOPE_LEN);
+
+  String out;
+  out.reserve(300 + n * 5);
+  char b[300];
+  snprintf(b, sizeof(b),
+           "{\"running\":%s,\"rate\":%.1f,\"dc\":%.4f,\"min\":%.4f,\"max\":%.4f,\"p2p\":%.4f,"
+           "\"rms\":%.4f,\"clip\":%u,\"zc\":%.1f,\"lo\":%u,\"hi\":%u,\"tone\":%s,\"s\":[",
+           a.running ? "true" : "false", a.sampleRate, a.dcV, a.minV, a.maxV, a.p2pV,
+           a.rmsV, (unsigned)a.clipped, a.zeroCrossHz, a.rawLo, a.rawHi,
+           TestTone::active() ? "true" : "false");
+  out += b;
+  for (size_t i = 0; i < n; i++) {
+    if (i) out += ',';
+    out += s[i];
+  }
+  out += "]}";
+  server.send(200, "application/json", out);
+}
+
+static void handleTone() {
+  TestTone::set(server.arg("on") == "1");
+  server.send(200, "application/json", TestTone::active() ? "{\"tone\":true}" : "{\"tone\":false}");
 }
 
 void webPortalBegin(const CRGB* leds, uint16_t numLeds) {
@@ -275,6 +423,8 @@ void webPortalBegin(const CRGB* leds, uint16_t numLeds) {
   server.on("/api/reset",  HTTP_POST, handleReset);
   server.on("/api/leds",   HTTP_GET,  handleLeds);
   server.on("/api/pluck",  HTTP_POST, handlePluck);
+  server.on("/api/adc",    HTTP_GET,  handleAdc);
+  server.on("/api/tone",   HTTP_POST, handleTone);
   server.onNotFound(handleRoot);   // any other path shows the UI
   server.begin();
 }

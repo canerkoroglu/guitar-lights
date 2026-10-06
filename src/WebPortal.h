@@ -6,8 +6,10 @@
  *   POST /api/config  -> merge JSON into Settings, apply live
  *                        (saved to NVS after 2 s of no further changes)
  *   POST /api/reset   -> restore defaults, save, return them as JSON
- *   GET  /api/leds    -> current LED colors, ["#rrggbb", ...], LED 0 first
- *   POST /api/pluck   -> trigger one simulated pick attack
+ *   GET  /api/leds    -> {"leds":["#rrggbb",...], "level", "db", "rise", "attacks"}
+ *   POST /api/pluck   -> pick the simulated guitar once
+ *   GET  /api/adc     -> guitar input stats + latest 512 raw samples
+ *   POST /api/tone?on=1|0 -> DAC test tone on GPIO26 (loopback test)
  */
 #pragma once
 #include <FastLED.h>

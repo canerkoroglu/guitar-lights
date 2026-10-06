@@ -42,10 +42,22 @@ struct Settings {
   uint8_t  pitchHigh;          // MIDI note at the last LED  (default E5 = 76)
   bool     reverse;            // mirror moving effects to match how the strip is mounted
 
-  // Test/simulate controls (no live audio yet — preview effects now).
-  bool     testAuto;           // simulated player
-  float    testLevel;          // 0..1 held level in manual mode
+  // Audio analysis (Phase 2 VU level, Phase 3 attacks)
+  uint8_t  audioSource;        // AudioSource
+  int8_t   gateDb;             // quieter than this (dB re full scale) = silence, level 0
+  int8_t   fullDb;             // this loud lights every LED (dB re full scale)
+  uint16_t releaseMs;          // how fast the level falls after playing stops
+  uint8_t  attackDb;           // attack threshold: level rise within 12 ms (dB)
+
+  // Simulated guitar (used when audioSource = SOURCE_SIMULATED)
+  bool     testAuto;           // auto-play
+  float    testLevel;          // 0..1 pick strength for manual notes and Pluck
   int8_t   testNote;           // -1 = none, else MIDI note (45 = A2)
+};
+
+enum AudioSource : uint8_t {
+  SOURCE_SIMULATED = 0,        // GuitarSynth, no hardware needed
+  SOURCE_GUITAR    = 1,        // ADC on GPIO34 through the MCP6022 buffer
 };
 
 namespace ConfigStore {

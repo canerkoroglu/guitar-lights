@@ -108,17 +108,21 @@ Guitar Output
 
 ## Buffer / Op-Amp
 
-Preferred first choice:
+Selected: **MCP6022-I/P** (DIP-8, dual), powered from the ESP32's 3.3V pin.
 
-- TL072
+Why:
 
-Possible alternatives:
+- Runs from 2.5-5.5V and is rail-to-rail on input and output, so it works on a single 3.3V supply.
+- Powered from 3.3V, its output cannot exceed the ESP32 ADC's input limit. The supply itself protects the ADC.
+- CMOS inputs draw about 1pA, so a 2.2MΩ bias resistor works, keeping the load on the passive pickups light.
+- Low noise (8.7 nV/√Hz) and 10MHz gain-bandwidth, far more than guitar audio needs. Unity-gain stable.
+- Faster op-amps can ring when driving a capacitor directly. The 1kΩ resistor between the output and the 22nF anti-alias capacitor isolates that load; keep it.
 
-- TL082
-- MCP6022
-- OPA2134
-- NE5532
-- LM358 as a basic fallback
+Not used:
+
+- TL072 / TL082 / NE5532 / OPA2134: need about 7V or more and are not rail-to-rail, so they cannot run from 3.3V. On a 9V supply their output could exceed the ESP32's 3.3V input limit and would need extra clamping.
+- LM358: on 3.3V its output only reaches about 1.8V, leaving almost no headroom above the 1.65V bias.
+- MCP6002: works in the same circuit (same pinout, 1.8-6V), but about 3x noisier with 1MHz bandwidth.
 
 Do not assume an op-amp is automatically suitable just because it is available. Check supply voltage, input/output range, biasing requirements, and the actual circuit before implementation.
 
@@ -871,7 +875,9 @@ Effects:
 
 Pitch direction caps band speed so a note jump does not alias into backwards motion, and ignores pitch changes under 1.5 semitones/s so vibrato does not read as movement.
 
-Until the guitar input exists (Phase 1+), `AudioSim` produces the `AudioFeatures` the effects consume. **Auto-play** simulates picked notes with decay and short slides; with auto-play off, the page holds a chosen note and level, and **Pluck** adds an attack. The real DSP will fill the same `AudioFeatures` struct, so the effects do not change.
+The **Audio** panel selects the source (Simulated guitar or Guitar input on GPIO34), shows a live level meter with an attack indicator, and sets the noise gate, full scale, release time and attack threshold (see Audio Analysis below).
+
+The **Simulated guitar** panel drives the simulated source: **Auto-play** picks notes with varied strength, slides and rests; with auto-play off, choosing a note picks it at the set **pick strength**, and **Pluck** picks again.
 
 Settings apply to the LEDs immediately and are saved to flash (NVS) after 2 seconds without further changes, so they survive power cycles.
 
@@ -881,9 +887,13 @@ API (JSON):
 GET  /api/config   current settings
 POST /api/config   partial or full update, applied live
 POST /api/reset    restore defaults
-GET  /api/leds     current LED colors, LED 0 first
-POST /api/pluck    simulated pick attack
+GET  /api/leds     {"leds": [...], "level", "db", "rise", "attacks"}: LED colors (LED 0 first) + audio level
+POST /api/pluck    pick the simulated guitar once
+GET  /api/adc      guitar input stats + latest 512 samples
+POST /api/tone?on=1|0   DAC test tone on GPIO26
 ```
+
+The **Guitar input** panel shows a live oscilloscope of GPIO34, DC level, peak-to-peak, RMS, measured sample rate, and a status: OK, No signal, Bias off, Clipping, or Test tone.
 
 USB serial commands (115200 baud, one per line), for configuring and testing without Wi-Fi:
 
@@ -891,43 +901,167 @@ USB serial commands (115200 baud, one per line), for configuring and testing wit
 {json}   apply settings, same format as POST /api/config (saved immediately)
 cfg      print current settings
 leds     print the LED buffer as hex, LED 0 first
-pluck    simulated pick attack
+pluck    pick the simulated guitar once
+feat     audio features: level, dB, onset, attack count, pitch
+adc      guitar input statistics
+scope    latest 512 raw ADC samples
+tone on / tone off   DAC test tone on GPIO26
 ```
 
 Firmware notes:
 
 - FastLED is pinned to 3.7.8. FastLED 3.10.x does not detect the ESP32 RMT driver on Arduino-ESP32 core 2.0.x and falls back to a blocking bit-bang driver that flickers with Wi-Fi active.
 - The `huge_app.csv` partition (3 MB app, no OTA) is used. Revisit when OTA updates are added.
+- Guitar input uses the I2S peripheral in built-in ADC mode with DMA, so sample timing is set by hardware. Measured on this board:
+  - The I2S clock divider is 8 bits and wraps below ~19.6 kHz (16 kHz requested gives ~89 kHz). I2S runs at 32 kHz and sample pairs are averaged to 16 kHz.
+  - Samples arrive swapped in pairs; pair averaging cancels this.
+  - Data is not inverted.
+  - The true output rate is ~15.94 kHz (32000 × 255/256 ÷ 2). DSP must use the measured `sampleRate`, not the nominal 16 kHz.
+  - Changing the I2S ADC channel at runtime hangs the driver. The channel is fixed at boot.
 
 ---
 
-# Initial Analog Circuit
-
-The first prototype should use:
+# Audio Analysis (Phase 2 and 3)
 
 ```text
-             3.3V
-              |
-             100k
-              |
-              +---------- ADC GPIO34
-              |
-             100k
-              |
-             GND
-
-Guitar signal
-     |
-   100nF
-     |
-     +---------- ADC/buffer input
+AudioInput (I2S ADC on GPIO34, or GuitarSynth)  ->  DC removal
+   -> AudioDsp:  EnvelopeDetector  -> dB -> 0..1 level   (Phase 2)
+                 AttackDetector    -> attack events      (Phase 3)
+   -> AudioFeatures -> EffectEngine
 ```
 
-This is only a starting topology.
+The DSP classes live in `lib/dsp/` as plain C++ (no Arduino), so the same code runs on the ESP32 and in host unit tests.
 
-For the final circuit, use a high-impedance buffer before the ADC and verify the actual signal amplitude and biasing with a multimeter/oscilloscope.
+## Phase 2: VU level
+
+- Peak envelope of the DC-free signal: 2 ms attack, configurable release (default 120 ms).
+- Converted to dB relative to the clean swing above the 1.65V bias (0.8V), then mapped linearly in dB from the **noise gate** (level 0, default -45 dB) to **full scale** (level 1, default -6 dB). dB mapping makes LED steps feel even from soft to hard playing.
+
+## Phase 3: Attack detection
+
+A guitar note is a stack of harmonics, and re-picking a ringing string often barely changes the overall level. High notes keep their own harmonics in the high frequencies, so "high frequencies went up" is not reliable either. What every attack does have is a part that cannot be predicted from the vibration just before it: the pick click, scrape noise, or a new pitch.
+
+- An adaptive linear predictor (NLMS, 24 taps) learns the current note's harmonic mix and cancels it. Its prediction residual stays small on a ringing note and jumps on an attack.
+- Two smooth envelopes are checked every 4 ms: the residual (catches re-picks in any register) and the broadband level (attacks from silence, palm mutes).
+- Onset value = how much either rose over the last 12 ms. It is large only on the rising edge, so the detector re-arms quickly for fast picking, while ringing notes, slides and vibrato change far less than 1 dB per 12 ms.
+- Fires above the **attack threshold** (default 6 dB) when the level is above the noise gate; re-arms below a third of the threshold; 60 ms refractory period. Attack strength = level at the attack.
+- Envelopes, not raw per-hop energy: a 4 ms hop is shorter than one period of low E (12 ms), so raw energy swings several dB with wave phase and re-triggers on a single note.
+
+## Simulated guitar (mock source)
+
+`GuitarSynth` replaces the ADC samples when Source = Simulated guitar, so the whole chain runs exactly as it will with the real guitar. It produces what GPIO34 would see through the MCP6022 buffer: a plucked string (`lib/dsp/PluckSynth`, 16 harmonics with faster decay for higher ones, pick noise, pick restarts the string from rest) on the 1.65V bias, plus ADC noise and 50 Hz hum. Pitch detection is Phase 4; until then the simulated guitar passes through the note it is playing so pitch effects keep working. With Guitar input selected, pitch effects stay idle until Phase 4.
+
+## Host unit tests
+
+```text
+pio test -e native
+```
+
+`test/test_dsp` plays scripted guitar parts through `PluckSynth` with ADC noise and hum, and checks the same DSP code the firmware runs:
+
+- silence: level 0, no attacks
+- soft pick gives a low level, hard pick a high level; harder pick gives a stronger attack
+- 8 different notes and strengths: exactly one attack each, within 12 ms
+- re-picking a ringing string, fast picking every 100 ms (E3, E4, E5)
+- a second string picked while the first rings
+- sustained note, slide, vibrato: no extra attacks
+- level falls within 0.8 s of muting
+
+## Phase 2 and 3 test procedure (with the guitar)
+
+1. Source = Guitar input. With the guitar volume down, the level meter should stay empty. If not, raise the noise gate until it does.
+2. Play softly, then hard. Soft playing should light a few LEDs (VU meter effect), hard playing most of them. Adjust full scale so your hardest playing just reaches the top.
+3. Pick single notes: the attack dot should flash once per pick. Let a note ring: no extra flashes. If picks are missed, lower the attack threshold; if a ringing note flashes, raise it.
+4. Fast picking on one string: one flash per pick.
+
+---
+
+# Phase 1 Analog Circuit
+
+Unity-gain MCP6022 buffer on a single 3.3V supply, biased at 1.65V.
+
+```text
+Bias (1.65 V)                           Supply
+
+3.3V --[100k]--+--[100k]-- GND          3.3V --+-- MCP6022 pin 8 (VDD)
+               |                               |
+             VBIAS                           100nF   (close to pin 8)
+               |                               |
+            [10uF]                            GND --- MCP6022 pin 4 (VSS)
+               |
+              GND
+
+Input buffer (op-amp A)
+
+Guitar tip --[100nF]--+--[100k]-- pin 3 (+IN A)
+                      |
+                   [2.2M]                pin 2 (-IN A) ---- pin 1 (OUT A)
+                      |
+                    VBIAS
+
+pin 1 (OUT A) --[1k]--+-- GPIO34
+                      |
+                   [22nF]
+                      |
+                     GND
+
+Unused op-amp B:  pin 5 (+IN B) -- VBIAS,   pin 6 (-IN B) -- pin 7 (OUT B)
+Guitar sleeve:    GND (common with ESP32 GND)
+```
+
+MCP6022-I/P pinout (DIP-8, notch at the top, pin 1 top-left):
+
+```text
+OUT A  1 +--U--+ 8  VDD
+-IN A  2 |     | 7  OUT B
++IN A  3 |     | 6  -IN B
+VSS    4 +-----+ 5  +IN B
+```
+
+Pin-by-pin wiring. Both op-amps must be wired; do not leave op-amp B floating.
+
+| Pin | Name | Connect to |
+|---|---|---|
+| 1 | OUT A | Pin 2 directly, and through the **1kΩ** resistor to GPIO34 (22nF from GPIO34 to GND). Never wire pin 1 straight to GPIO34 |
+| 2 | -IN A | Pin 1 (voltage follower) |
+| 3 | +IN A | Guitar signal after the 100nF coupling capacitor and 100kΩ series resistor; 2.2MΩ from this node to VBIAS |
+| 4 | VSS | GND |
+| 5 | +IN B | VBIAS (1.65V) |
+| 6 | -IN B | Pin 7 |
+| 7 | OUT B | Pin 6 only. No connection to the ESP32 or the signal path |
+| 8 | VDD | 3.3V, with 100nF to GND right at the pin |
+
+Op-amp B is not part of the audio path. It is parked as a follower at VBIAS so its inputs and output sit in a defined, stable state.
+
+| Part | Role |
+|---|---|
+| 100nF input capacitor | AC coupling: blocks DC, passes audio (corner ~0.7 Hz with 2.2MΩ) |
+| 2.2MΩ to VBIAS | Holds the input at 1.65V; the load the pickups see (with the amp's 1MΩ in parallel, ~690kΩ total) |
+| 100kΩ series | Limits current into the op-amp's input protection diodes if a very hot signal exceeds the rails |
+| 100kΩ + 100kΩ + 10µF | 1.65V bias, filtered (corner ~0.3 Hz) so Wi-Fi noise on the 3.3V rail stays out of the signal |
+| MCP6022 A | Unity-gain buffer: high impedance in, low impedance out to the ADC |
+| 1kΩ + 22nF | Anti-aliasing low-pass at ~7 kHz and a charge reservoir for the ADC. The 1kΩ also keeps the 22nF from loading the op-amp output directly (prevents ringing) |
+| 100nF at pin 8 | Op-amp supply decoupling |
+| MCP6022 B | Unused; parked as a follower at VBIAS so it cannot oscillate |
+
+Signal tap for testing: guitar into a Y splitter, one branch to the amp, the other to a 6.35 mm jack on the breadboard.
+
+Headroom: the ESP32 ADC is accurate from about 0.15V to 2.45V at 11 dB attenuation, so the 1.65V bias allows about 0.8V of clean swing upward. Passive pickups usually stay inside that at unity gain. Add gain only if the measured signal is small (see Phase 1 test procedure): replace the follower link with a non-inverting stage whose gain resistor returns to VBIAS through a capacitor, so DC gain stays 1.
+
+If the amp hums when the circuit is connected, it is likely a ground loop through USB. Run the ESP32 from a power bank or a laptop on battery.
 
 Do not connect a potentially negative guitar signal directly to the ESP32.
+
+## Phase 1 Test Procedure
+
+Open the control page, expand **Guitar input (GPIO34)**.
+
+1. **Loopback (no circuit).** Nothing on GPIO34. Jumper GPIO26 to GPIO34, switch **Test tone** on. Expect a clean sine, DC about 1.1V, peak-to-peak about 0.8V, about 260 crossings/s (the DAC tone generator steps in ~130 Hz, ±5% per chip), clipped 0. Switch the tone off and **remove the jumper**.
+2. **Circuit, no guitar.** Build the circuit, measure VBIAS with a multimeter (about 1.65V), connect the 1kΩ output to GPIO34. Expect DC about 1.65V, peak-to-peak under 0.02V, status "No signal".
+3. **Guitar.** Connect through the Y splitter. Play softly, then strum hard. Expect a visible waveform, status "OK", clipped 0, DC staying near 1.65V.
+4. **Tone check.** Listen through the amp with the ESP32 branch connected and disconnected. There should be no audible difference.
+
+Readings are also available over USB serial with the `adc` and `scope` commands.
 
 ---
 

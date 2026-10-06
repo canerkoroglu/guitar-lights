@@ -1,7 +1,7 @@
 /*
  * Guitar Reactive RGB LED System — ESP32-WROOM-32
  * ------------------------------------------------------------------
- * Current stage: Phase 0 hardware validation + Wi-Fi control portal.
+ * Current stage: Phase 1 analog guitar input (+ Phase 0 LEDs, Wi-Fi portal).
  *
  * Boot:
  *   1. Quick LED self test (Red -> Green -> Blue -> Off).
@@ -11,16 +11,20 @@
  * Connect a phone/laptop to the "GuitarRGB" Wi-Fi network, then open
  * http://192.168.4.1/  (or http://guitar.local/ on macOS/iOS).
  *
- * Audio effects are driven by AudioSim (simulated player, or the web UI's
- * manual test controls) until the real guitar input and DSP exist
- * (Phase 1-4). Both produce the same AudioFeatures, so effects will not
- * need to change.
+ * Audio path: AudioInput (I2S ADC, or GuitarSynth when Source = Simulated
+ * guitar) -> DC removal -> AudioDsp (Phase 2 VU level, Phase 3 attacks)
+ * -> AudioFeatures -> EffectEngine. Pitch detection is Phase 4; until
+ * then the simulated guitar passes through the note it is playing.
  *
  * USB serial commands (115200 baud, one per line):
  *   {json}  apply settings, same format as POST /api/config
  *   cfg     print current settings
  *   leds    print the LED buffer as hex, LED 0 first
- *   pluck   trigger one simulated pick attack
+ *   pluck   pick the simulated guitar once
+ *   feat    print audio features (level, dB, attacks, pitch)
+ *   adc     print guitar input statistics (GPIO34)
+ *   scope   print the latest 512 raw ADC samples (blocks loop ~0.2 s)
+ *   tone on / tone off   DAC test tone on GPIO26 for the loopback test
  *
  * Wiring (readme.md pin plan):
  *   ESP32 GPIO18 --[330ohm]--> WS2812B DIN   (resistor near first LED)
@@ -34,7 +38,10 @@
 #include <FastLED.h>
 #include "Config.h"
 #include "AudioFeatures.h"
-#include "AudioSim.h"
+#include "AudioDsp.h"
+#include "GuitarSynth.h"
+#include "AudioInput.h"
+#include "TestTone.h"
 #include "EffectEngine.h"
 #include "WebPortal.h"
 
@@ -65,6 +72,14 @@ static void quickSelfTest() {
   FastLED.clear(true);
 }
 
+static void printAdc() {
+  const AudioInput::Stats a = AudioInput::stats();
+  Serial.printf("adc running=%d rate=%.0f dc=%.3f min=%.3f max=%.3f p2p=%.3f rms=%.4f "
+                "clip=%u zc=%.1f lo=%u hi=%u tone=%d\n",
+                a.running, a.sampleRate, a.dcV, a.minV, a.maxV, a.p2pV, a.rmsV,
+                (unsigned)a.clipped, a.zeroCrossHz, a.rawLo, a.rawHi, TestTone::active());
+}
+
 static void handleSerial() {
   static String line;
   while (Serial.available()) {
@@ -91,10 +106,26 @@ static void handleSerial() {
       }
       Serial.println();
     } else if (line == "pluck") {
-      audioSimPluck();
+      GuitarSynth::pluck();
+      Serial.println(F("ok"));
+    } else if (line == "feat") {
+      const AudioDsp::Snapshot d = AudioDsp::snapshot();
+      Serial.printf("feat level=%.3f db=%.1f rise=%.1f attacks=%u strength=%.2f "
+                    "pitch=%d midi=%.2f vel=%.1f\n",
+                    d.level, d.db, d.rise, (unsigned)d.attacks, d.attackStrength,
+                    d.pitchValid, d.midi, d.velocity);
+    } else if (line == "adc") {
+      printAdc();
+    } else if (line == "scope") {
+      static uint16_t s[AudioInput::SCOPE_LEN];
+      const size_t n = AudioInput::scope(s, AudioInput::SCOPE_LEN);
+      for (size_t i = 0; i < n; i++) Serial.printf("%u ", s[i]);
+      Serial.println();
+    } else if (line == "tone on" || line == "tone off") {
+      TestTone::set(line == "tone on");
       Serial.println(F("ok"));
     } else if (line.length()) {
-      Serial.println(F("commands: {json} | cfg | leds | pluck"));
+      Serial.println(F("commands: {json} | cfg | leds | pluck | feat | adc | scope | tone on | tone off"));
     }
     line = "";
   }
@@ -105,7 +136,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println(F("== Guitar RGB : Phase 0 + web control =="));
+  Serial.println(F("== Guitar RGB : Phase 1 guitar input + web control =="));
   Serial.printf("Chip %s rev %d, %d cores @ %u MHz, heap %u\n",
                 ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores(),
                 ESP.getCpuFreqMHz(), ESP.getFreeHeap());
@@ -125,6 +156,13 @@ void setup() {
 
   webPortalBegin(leds, NUM_LEDS);
 
+  if (AudioInput::begin()) {
+    Serial.printf("Guitar input: I2S ADC on GPIO%d @ %u Hz\n",
+                  AudioInput::ADC_GPIO, (unsigned)AudioInput::SAMPLE_RATE);
+  } else {
+    Serial.println(F("Guitar input: FAILED to start I2S ADC"));
+  }
+
   Serial.printf("Wi-Fi AP \"%s\"  password \"%s\"\n", AP_SSID, AP_PASS);
   Serial.printf("Open http://%s/  or  http://%s.local/\n",
                 WiFi.softAPIP().toString().c_str(), MDNS_NAME);
@@ -142,8 +180,18 @@ void loop() {
     lastFrame = now;
     const Settings& s = ConfigStore::get();
 
+    // Attacks arrive as a counter from the audio task; an attack is "new"
+    // for exactly one frame (the refractory period is longer than a frame).
+    static uint32_t seenAttacks = 0;
+    const AudioDsp::Snapshot d = AudioDsp::snapshot();
     AudioFeatures audio;
-    audioSimUpdate(s, now, audio);
+    audio.level          = d.level;
+    audio.attackDetected = d.attacks != seenAttacks;
+    audio.attackStrength = d.attackStrength;
+    audio.pitchValid     = d.pitchValid;
+    audio.midiNote       = d.midi;
+    audio.pitchVelocity  = d.velocity;
+    seenAttacks = d.attacks;
 
     engine.render(s, now, audio);
     FastLED.setBrightness(s.power ? s.brightness : 0);
@@ -152,7 +200,9 @@ void loop() {
 
   if (now - lastBeat >= HEARTBEAT_MS) {
     lastBeat = now;
-    Serial.printf("[hb] up=%lus clients=%d heap=%u\n",
-                  now / 1000UL, WiFi.softAPgetStationNum(), ESP.getFreeHeap());
+    const AudioInput::Stats a = AudioInput::stats();
+    Serial.printf("[hb] up=%lus clients=%d heap=%u | adc %.0fHz dc=%.2fV p2p=%.3fV clip=%u\n",
+                  now / 1000UL, WiFi.softAPgetStationNum(), ESP.getFreeHeap(),
+                  a.sampleRate, a.dcV, a.p2pV, (unsigned)a.clipped);
   }
 }

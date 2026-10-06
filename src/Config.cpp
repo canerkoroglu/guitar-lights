@@ -42,8 +42,14 @@ void ConfigStore::setDefaults() {
     g.noteColors[i] = {(uint8_t)(pal[i] >> 16), (uint8_t)(pal[i] >> 8), (uint8_t)pal[i]};
   }
 
+  g.audioSource = SOURCE_SIMULATED;   // no input circuit yet
+  g.gateDb      = -45;
+  g.fullDb      = -6;
+  g.releaseMs   = 120;
+  g.attackDb    = 6;
+
   g.testAuto  = true;
-  g.testLevel = 0.5f;
+  g.testLevel = 0.7f;
   g.testNote  = -1;
 }
 
@@ -75,6 +81,12 @@ String ConfigStore::toJson() {
 
   JsonArray nc = doc["noteColors"].to<JsonArray>();
   for (int i = 0; i < 12; i++) nc.add(toHex(g.noteColors[i]));
+
+  doc["source"]    = g.audioSource;
+  doc["gateDb"]    = g.gateDb;
+  doc["fullDb"]    = g.fullDb;
+  doc["releaseMs"] = g.releaseMs;
+  doc["attackDb"]  = g.attackDb;
 
   JsonObject t = doc["test"].to<JsonObject>();
   t["auto"]  = g.testAuto;
@@ -110,6 +122,13 @@ bool ConfigStore::fromJson(const String& body, String& err) {
       g.noteColors[i++] = fromHex(v.as<const char*>());
     }
   }
+
+  if (!doc["source"].isNull())    g.audioSource = constrain(doc["source"].as<int>(), 0, 1);
+  if (!doc["gateDb"].isNull())    g.gateDb      = constrain(doc["gateDb"].as<int>(), -80, -10);
+  if (!doc["fullDb"].isNull())    g.fullDb      = constrain(doc["fullDb"].as<int>(), -40, 0);
+  if (!doc["releaseMs"].isNull()) g.releaseMs   = constrain(doc["releaseMs"].as<int>(), 20, 1000);
+  if (!doc["attackDb"].isNull())  g.attackDb    = constrain(doc["attackDb"].as<int>(), 2, 30);
+  if (g.fullDb < g.gateDb + 6)    g.fullDb      = g.gateDb + 6;   // keep a usable range
 
   if (doc["test"].is<JsonObject>()) {
     JsonObject t = doc["test"].as<JsonObject>();
