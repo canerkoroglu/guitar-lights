@@ -443,16 +443,19 @@ void EffectEngine::renderTuner(const Settings& s, uint32_t now, const AudioFeatu
   leds_[idx(s, 0)]      = noteC;
   leds_[idx(s, n_ - 1)] = noteC;
 
+  // The dot stays off the end LEDs, so the note color is always visible.
+  const float pos = n_ > 2 ? constrain(tuner::position(tunerCents_, n_), 1.0f, (float)(n_ - 2))
+                           : tuner::position(tunerCents_, n_);
   switch (tuner::zone(tunerCents_)) {
     case tuner::Zone::InTune:
       leds_[idx(s, lo)] = CRGB(0, 255, 40);
       leds_[idx(s, hi)] = CRGB(0, 255, 40);
       break;
     case tuner::Zone::Close:
-      dotAt(s, tuner::position(tunerCents_, n_), CRGB(255, 150, 0));
+      dotAt(s, pos, CRGB(255, 150, 0));
       break;
     case tuner::Zone::Off:
-      dotAt(s, tuner::position(tunerCents_, n_), CRGB(255, 0, 0));
+      dotAt(s, pos, CRGB(255, 0, 0));
       break;
   }
 }

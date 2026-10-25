@@ -23,7 +23,7 @@ float cellVolts(uint32_t pinMv, int16_t trimMv) {
 
 void Battery::begin() {
   Preferences p;
-  p.begin("battery", true);
+  p.begin("battery", false);   // read-write: creates the namespace, no "not found" log
   bootOnly = p.getBool("bootOnly", false);
   p.end();
 }

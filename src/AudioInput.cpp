@@ -47,6 +47,7 @@ uint16_t          rawLo = 0, rawHi = 4095;
 volatile bool          batteryRequested = false;
 volatile uint32_t      batteryReadAt    = 0;   // millis() of the last runtime read
 volatile uint32_t      blocks           = 0;   // completed blocks, for the stall watchdog
+volatile int           enableState      = 0;   // audio task start: 0 pending, 1 ok, -1 failed
 AudioInput::BatteryPin batteryPublished = {0, 0};
 
 float rawToV(int raw) {
@@ -79,6 +80,15 @@ void publishBattery(uint32_t mv) {
 }
 
 void audioTask(void*) {
+  // ADC1's lock is a FreeRTOS mutex: the task that takes it (i2s_adc_enable)
+  // must be the one that releases it (i2s_adc_disable, for battery reads).
+  // So every enable/disable happens here, in this task, never in setup().
+  if (i2s_adc_enable(I2S_PORT) != ESP_OK) {
+    enableState = -1;
+    vTaskDelete(nullptr);
+  }
+  enableState = 1;
+
   static uint16_t dma[DMA_LEN];
   static uint16_t block[DMA_LEN / 2];
   static float    ac[DMA_LEN / 2];
@@ -95,7 +105,10 @@ void audioTask(void*) {
 
   for (;;) {
     size_t bytes = 0;
-    if (i2s_read(I2S_PORT, dma, sizeof(dma), &bytes, portMAX_DELAY) != ESP_OK) continue;
+    if (i2s_read(I2S_PORT, dma, sizeof(dma), &bytes, portMAX_DELAY) != ESP_OK) {
+      vTaskDelay(1);   // never spin at this priority: it would starve loop()
+      continue;
+    }
     blocks++;
 
     // After a battery read the DMA ring still holds samples taken while
@@ -153,7 +166,8 @@ void audioTask(void*) {
       batteryReadAt    = millis() | 1;   // never 0
       i2s_adc_disable(I2S_PORT);
       const uint32_t mv = readBatteryPinMv();
-      i2s_adc_enable(I2S_PORT);   // restores the I2S ADC pattern for GPIO34
+      const esp_err_t e = i2s_adc_enable(I2S_PORT);   // restores the I2S ADC pattern for GPIO34
+      if (e != ESP_OK) Serial.printf("[audio] i2s_adc_enable after battery read failed: %d\n", (int)e);
       publishBattery(mv);
       dropBlocks    = DMA_COUNT + 1;
       restartWindow = true;
@@ -226,7 +240,6 @@ bool AudioInput::begin() {
   // call only routes the pin to the ADC.
   adc1_config_channel_atten(CHANNEL, ADC_ATTEN_DB_11);
   if (i2s_set_adc_mode(ADC_UNIT_1, CHANNEL) != ESP_OK) return false;
-  if (i2s_adc_enable(I2S_PORT) != ESP_OK) return false;
 
   // Raw limits of the range Espressif specifies as accurate at 11 dB.
   while (rawLo < 4095 && rawToV(rawLo) < 0.150f) rawLo++;
@@ -239,7 +252,10 @@ bool AudioInput::begin() {
   GuitarSynth::begin(ACTUAL_RATE, biasRaw, lsbPerVolt);
   AudioDsp::begin(ACTUAL_RATE, (float)(rawHi - biasRaw));   // clean swing above bias
 
-  return xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 3, nullptr, 1) == pdPASS;
+  if (xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 3, nullptr, 1) != pdPASS) return false;
+  // The task enables the ADC itself (see audioTask); wait for its verdict.
+  for (int i = 0; i < 500 && enableState == 0; i++) delay(1);
+  return enableState == 1;
 }
 
 AudioInput::Stats AudioInput::stats() {

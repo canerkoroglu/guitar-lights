@@ -293,8 +293,14 @@ function showBattery(b){
 }
 
 // Tuner readout: note name, cents and a needle (half the scale = 50 cents).
+// After the user flips a live switch, ignore the polled state for a moment:
+// a reply already on its way would otherwise flip it back.
+const heldUntil={};
+const hold=id=>heldUntil[id]=Date.now()+800;
+const held=id=>(heldUntil[id]||0)>Date.now();
+
 function showTuner(d){
-  $("tunerOn").checked=d.tuner;
+  if(!held("tunerOn"))$("tunerOn").checked=d.tuner;
   $("tunerView").hidden=!d.tuner;
   if(!d.tuner)return;
   const n=$("tNote"),c=$("tCents"),k=$("tNeedle");
@@ -305,15 +311,21 @@ function showTuner(d){
   k.style.display="block";k.style.left=(50+ct)+"%";
 }
 
+// A change that did not reach the board (offline, server busy) is kept and
+// retried, so the page never shows a value the LEDs are not using. Edits
+// made in the meantime win over the retried ones.
 async function send(){
   clearTimeout(timer);
   const body=pending;
   pending={};
   if(!Object.keys(body).length){status("applied");return;}
+  let retry=false;
   try{
     const r=await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     status(r.ok?"applied":"error "+r.status);
-  }catch(e){status("offline");}
+    retry=r.status>=500;
+  }catch(e){status("offline, retrying");retry=true;}
+  if(retry){pending=merge(body,pending);clearTimeout(timer);timer=setTimeout(send,1000);}
 }
 function queue(p){if(!p)return;merge(pending,p);clearTimeout(timer);timer=setTimeout(send,120);}
 
@@ -365,8 +377,9 @@ async function loadPresets(){
 $("presets").onclick=async e=>{
   const b=e.target.closest("button");
   if(!b)return;
-  clearTimeout(timer);
-  pending={};   // the preset replaces those fields; fill() shows the result
+  // The preset replaces these fields; send any other pending edit first.
+  for(const k of ["mode","speed","trail","staticColor","noteColors"])delete pending[k];
+  await send();
   try{
     const r=await fetch("/api/preset?i="+b.dataset.i,{method:"POST"});
     if(!r.ok)throw new Error(r.status);
@@ -432,7 +445,7 @@ function drawAdc(d){
   else if(d.dc<1.4||d.dc>1.9){st="Bias off (expect ~1.65 V)";cls="bad";}
   else if(d.p2p<0.02){st="No signal";cls="info";}
   const c=$("adcState");c.textContent=st;c.className="chip "+cls;
-  $("tone").checked=d.tone;
+  if(!held("tone"))$("tone").checked=d.tone;
 }
 async function pollAdc(){
   if(!document.hidden&&$("inputCard").open){
@@ -443,9 +456,9 @@ async function pollAdc(){
 
 document.addEventListener("input",onEdit);
 document.addEventListener("change",onEdit);
-$("tone").onchange=e=>fetch("/api/tone?on="+(e.target.checked?1:0),{method:"POST"}).catch(()=>status("offline"));
+$("tone").onchange=e=>(hold("tone"),fetch("/api/tone?on="+(e.target.checked?1:0),{method:"POST"}).catch(()=>status("offline")));
 $("save").onclick=send;
-$("tunerOn").onchange=e=>fetch("/api/tuner?on="+(e.target.checked?1:0),{method:"POST"}).catch(()=>status("offline"));
+$("tunerOn").onchange=e=>(hold("tunerOn"),fetch("/api/tuner?on="+(e.target.checked?1:0),{method:"POST"}).catch(()=>status("offline")));
 $("batShow").onclick=()=>fetch("/api/battery/show",{method:"POST"}).catch(()=>status("offline"));
 $("pluck").onclick=()=>fetch("/api/pluck",{method:"POST"}).catch(()=>status("offline"));
 $("reset").onclick=async()=>{
