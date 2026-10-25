@@ -838,7 +838,8 @@ For a typical ESP32-WROOM-32 development board, a possible starting configuratio
 ```text
 GPIO34  -> Guitar ADC input
 GPIO18  -> WS2812 data
-GPIO25  -> Mode button
+GPIO25  -> Mode button (to GND, internal pull-up)
+GPIO35  -> Battery monitor (optional, 100k/100k divider from the cell)
 ```
 
 GPIO34 is input-only and is suitable for ADC input.
@@ -891,6 +892,7 @@ Notes:
 - Effects that color by note use the **static color** while no pitch is known. Peak flash uses white. Sustain keeps the last note color through its fade.
 - Everything with a direction respects **Reverse**.
 - The page dims the Speed, Trail and Static color rows when the selected effect does not use them.
+- The page has a **Tuner** card (switch plus note/cents readout) and a **Battery** card; see "Mode button and tuner" and "Battery monitor" below.
 - The page sends only the setting you change, so two phones (or a preset applied over serial) do not overwrite each other's other settings.
 - Pitch direction caps band speed so a note jump does not alias into backwards motion, and ignores pitch changes under 1.5 semitones/s so vibrato does not read as movement.
 - Fire's cooling and sparking ranges were tuned for 16 LEDs by simulating the heat model: Fire2012's defaults (made for ~30 LEDs) flood a short strip with heat at high level.
@@ -926,7 +928,7 @@ Ice      00ffff 00d4ff 00aaff 007fff 0055ff 002aff 0000ff 002aff 0055ff 007fff 0
 Neon     ff00ff 00ffff aaff00 ff0080 00ff80 ffff00 8000ff 00aaff ff5500 ff00aa 00ff00 0055ff
 ```
 
-The preset table lives in firmware (`src/Presets.cpp`, name + partial settings JSON) and is applied through the same settings merge and 2-second deferred save as the web page, so the Phase 8 mode button can cycle presets without a phone. On the page, the **Presets** card sits right below the live preview: tapping a preset applies it, refreshes every control and shows "Preset: name".
+The preset table lives in firmware (`src/Presets.cpp`: name, effect, speed, trail, colors) and is applied through the same settings merge and 2-second deferred save as the web page, so the Phase 8 mode button can cycle presets without a phone. On the page, the **Presets** card sits right below the live preview: tapping a preset applies it, refreshes every control and shows "Preset: name".
 
 The **Audio** panel selects the source (Simulated guitar or Guitar input on GPIO34), shows a live level meter with an attack indicator and a pitch readout (note, cents, confidence), and sets the noise gate, full scale, release time, attack threshold and pitch confidence (see Audio Analysis below).
 
@@ -947,7 +949,11 @@ POST /api/tone?on=1|0   DAC test tone on GPIO26
 GET  /api/effects  {"effects": [{"mode", "group", "name", "desc", "uses"}, ...]}: the page builds its effect menu from this (src/EffectCatalog.cpp)
 GET  /api/presets  {"presets": ["Classic VU", ...]}
 POST /api/preset?i=N    apply preset N, returns the full settings JSON
+POST /api/tuner?on=1|0  tuner on the LEDs (live state, not saved)
+POST /api/battery/show  battery gauge on the LEDs for 2.5 s
 ```
+
+`/api/leds` also reports `"tuner"` and `"bat": {"fitted", "state", "v", "pct", "bootOnly"}`.
 
 The **Guitar input** panel shows a live oscilloscope of GPIO34, DC level, peak-to-peak, RMS, measured sample rate, and a status: OK, No signal, Bias off, Clipping, or Test tone.
 
@@ -964,6 +970,9 @@ feat     audio features: level, dB, onset, attacks, pitch (note, cents, confiden
 adc      guitar input statistics
 scope    latest 512 raw ADC samples
 tone on / tone off   DAC test tone on GPIO26
+tuner on / tuner off
+bat      battery monitor: pin mV, cell V, %, state
+press short | press long | press hold   act as the mode button (test without the button)
 ```
 
 Firmware notes:
@@ -976,6 +985,59 @@ Firmware notes:
   - Data is not inverted.
   - The true output rate is ~15.94 kHz (32000 × 255/256 ÷ 2). DSP must use the measured `sampleRate`, not the nominal 16 kHz.
   - Changing the I2S ADC channel at runtime hangs the driver. The channel is fixed at boot.
+
+## Mode button and tuner (Phase 8)
+
+A momentary button from **GPIO25 to GND**. No resistor: the ESP32's internal pull-up is used. Contact bounce is filtered in software (25 ms), and a button that is already pressed at power-up is ignored until it is released.
+
+| Gesture | Action |
+|---|---|
+| Short press (< 0.6 s) | Next preset, in table order. With the lights off: lights on. In the tuner: leave the tuner |
+| Long press (0.6-2 s, on release) | Tuner on / off |
+| Hold 2 s | Battery gauge for 2.5 s (shown while still holding) |
+
+**Tuner.** The two middle LEDs are the target (dim white). A dot shows how far the note is from pitch: half the strip is 50 cents, flat to the low side and sharp to the high side (respects Reverse). Red = more than 15 cents off, amber = within 15 cents, and the two middle LEDs turn **green within +-3 cents**. The end LEDs glow in the note's color, so you can see which note was heard. The needle is smoothed over ~120 ms and jumps straight to a new note. The web page shows the note name and cents as well. The tuner and the battery gauge stay visible with the lights switched off and at very low brightness (minimum brightness 24). Tuner state is not saved: after a restart the strip is back in its normal effect.
+
+Test procedure (no button needed: use the serial `press short|long|hold` commands, then repeat with the button):
+
+1. Short press: the effect changes to the next preset; the serial log prints `[button] preset N name`.
+2. Long press: tuner on. Pick an open string: the note's color shows at both ends. Tune down: the dot moves to the low side and turns amber, then the middle pair turns green at pitch. Long press again: tuner off.
+3. Hold 2 s: the battery gauge appears while still holding (blue blinks if the monitor is not fitted).
+4. Tap the button very quickly (< 25 ms) or switch on with it held: nothing happens.
+
+## Battery monitor (Phase 9)
+
+Optional. The cell voltage is read on **GPIO35** through a divider:
+
+```text
+Cell + (after the BMS) --[100k 1%]--+--[100k 1%]-- GND
+                                    |
+                                  GPIO35 ---[100nF]--- GND
+```
+
+GPIO35 sees half the cell voltage (1.5-2.1 V for 3.0-4.2 V), inside the ADC's accurate range. The 100 nF gives the ADC a low-impedance source. The divider draws ~20 uA; take it from after the BMS so it is cut off with the cell.
+
+Turn on **Battery monitor fitted** on the web page (Battery card). Then:
+
+- The charge shows in the page header and the Battery card, and on the LEDs when you hold the mode button 2 s (green > 50 %, amber 20-50 %, red < 20 %).
+- **Low** (below 3.50 V): the last LED pulses red for 0.3 s every 10 s.
+- **Critical** (below 3.35 V): the last two LEDs pulse red every 5 s, and brightness is capped at 48 to stretch the remaining charge.
+- Each state needs the voltage 0.1 V above its threshold to clear, so it does not flicker on and off.
+- **Calibration**: measure the cell with a multimeter and move the Calibration slider (+-300 mV) until the reading matches.
+
+The BMS protects the cell. This monitor is information for the player only.
+
+How it is read: ADC1 is owned by the I2S sampler, so the pin can only be read by handing ADC1 back for a moment (`i2s_adc_disable`, read, `i2s_adc_enable`), which drops ~80 ms of audio. The firmware reads the pin once at boot, before audio starts, and then every 30 s, but only when the input is below the noise gate, so it never happens while you play. The 80 ms after a read are discarded so the DSP never sees the gap. Readings outside 2.5-4.5 V (no divider, floating pin) are ignored.
+
+**Audio watchdog.** If the audio task ever stops for 1.5 s, the board restarts (LEDs back within ~2 s) instead of freezing. If that happened right after a runtime battery read, runtime reads are switched off for good (saved in flash): the battery is then only read at boot, and the page says "read at boot only". Clear it with a flash erase, or by removing the `battery` NVS namespace.
+
+Test procedure:
+
+1. Without the divider, monitor off: no battery UI, `bat` prints `fitted=0`.
+2. Fit the divider, turn the monitor on: `bat` shows pin mV about half the cell voltage; the page shows the charge. Compare with a multimeter, adjust Calibration.
+3. Play continuously for 2 minutes: no audio gaps, no extra attacks (`feat` attacks only count your picks). Stop playing: within 30 s `bat` shows a new reading.
+4. Bench supply instead of the cell: 3.45 V gives Low, 3.30 V Critical (dimmer strip, two red pulses), 3.70 V back to OK.
+5. Leave it running for an hour on the simulated guitar: `[hb]` keeps printing and no `[watchdog]` message appears.
 
 ---
 
@@ -1065,6 +1127,12 @@ pio test -e native
 - sustained note, slide, vibrato: no extra attacks
 - level falls within 0.8 s of muting
 - shared helpers in `lib/dsp/DspMath.h`: one-pole time constant, MIDI <-> Hz
+
+`test/test_controls` checks `lib/control` (plain C++ like `lib/dsp`):
+
+- mode button: short / long / hold, contact bounce, glitches, held at power-up, `millis()` wrap-around
+- battery: charge curve, Low / Critical with hysteresis, one dip under LED load does not warn, implausible readings ignored
+- tuner scale: centre = in tune, clamping, in-tune / close / off zones
 
 `test/test_pitch` runs the same way through `AudioAnalyzer`:
 

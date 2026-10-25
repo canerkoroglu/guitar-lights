@@ -13,6 +13,9 @@
  *   POST /api/reset   -> restore defaults, save, return them as JSON
  *   GET  /api/leds    -> {"leds":["#rrggbb",...], "level", "db", "rise", "attacks",
  *                         "note" (-1 if none), "cents", "conf"}
+ *                        + "tuner", "bat":{"fitted","state","v","pct","bootOnly"}
+ *   POST /api/tuner?on=1|0 -> tuner on the LEDs (live state, not saved)
+ *   POST /api/battery/show -> battery gauge on the LEDs for 2.5 s
  *   POST /api/pluck   -> pick the simulated guitar once
  *   GET  /api/adc     -> guitar input stats + latest 512 raw samples
  *   POST /api/tone?on=1|0 -> DAC test tone on GPIO26 (loopback test)

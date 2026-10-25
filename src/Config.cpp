@@ -72,6 +72,9 @@ void ConfigStore::setDefaults() {
   d.testLevel = 0.7f;
   d.testNote  = -1;
 
+  d.batteryFitted = false;   // the divider is optional hardware
+  d.batteryTrimMv = 0;
+
   commit(d);
 }
 
@@ -135,6 +138,10 @@ String ConfigStore::toJson() {
   t["level"] = g.testLevel;
   t["note"]  = g.testNote;
 
+  JsonObject b = doc["battery"].to<JsonObject>();
+  b["fitted"] = g.batteryFitted;
+  b["trimMv"] = g.batteryTrimMv;
+
   String out;
   serializeJson(doc, out);
   return out;
@@ -183,6 +190,12 @@ bool ConfigStore::fromJson(const String& body, String& err) {
       const int note = t["note"].as<int>();   // MIDI note, or -1 for none
       n.testNote = (note < 0) ? -1 : (int8_t)constrain(note, 24, 108);
     }
+  }
+
+  if (doc["battery"].is<JsonObject>()) {
+    JsonObject b = doc["battery"].as<JsonObject>();
+    if (!b["fitted"].isNull()) n.batteryFitted = b["fitted"].as<bool>();
+    if (!b["trimMv"].isNull()) n.batteryTrimMv = (int16_t)constrain(b["trimMv"].as<int>(), -300, 300);
   }
   commit(n);
   return true;

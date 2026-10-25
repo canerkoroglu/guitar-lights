@@ -18,6 +18,7 @@ namespace AudioInput {
   constexpr float    ACTUAL_RATE = 15937.5f; // Hz: I2S 32000 * 255/256, halved (measured)
   constexpr int      ADC_GPIO    = 34;      // ADC1_CH6: input-only, usable with Wi-Fi on
   constexpr size_t   SCOPE_LEN   = 512;     // samples kept for the scope (32 ms)
+  constexpr int      BATTERY_GPIO = 35;     // ADC1_CH7: cell voltage through a 100k/100k divider
 
   struct Stats {
     bool     running;
@@ -34,4 +35,21 @@ namespace AudioInput {
   bool   begin();
   Stats  stats();                           // latest 250 ms window, thread-safe copy
   size_t scope(uint16_t* out, size_t n);    // most recent raw samples, oldest first
+
+  // Battery pin (Phase 9). ADC1 belongs to the I2S sampler, so the pin can
+  // only be read by briefly handing ADC1 back, which drops ~80 ms of
+  // audio. requestBatteryRead() therefore only asks: the audio task does
+  // it at the next moment the input is below the noise gate, never while
+  // you play. begin() takes the first reading before audio starts.
+  struct BatteryPin {
+    uint32_t seq;   // increments with every new reading; 0 = none yet
+    uint32_t mv;    // calibrated voltage at GPIO35, millivolts
+  };
+  void       requestBatteryRead();          // any task
+  BatteryPin batteryPin();                  // latest reading, thread-safe copy
+  uint32_t   lastBatteryReadMs();           // millis() of the last runtime read, 0 = none
+
+  // Blocks the audio task has completed. Stops advancing if the task stalls
+  // (main.cpp restarts the board then: the LEDs must never freeze on stage).
+  uint32_t   blockCount();
 }

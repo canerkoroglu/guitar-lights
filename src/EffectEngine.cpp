@@ -1,5 +1,6 @@
 #include "EffectEngine.h"
 #include <math.h>
+#include "TunerScale.h"
 
 static inline CRGB toCRGB(const RGBColor& c) { return CRGB(c.r, c.g, c.b); }
 
@@ -65,12 +66,16 @@ void EffectEngine::drawVu(const Settings& s, float level) {
   }
 }
 
-void EffectEngine::render(const Settings& s, uint32_t now, const AudioFeatures& a) {
-  if (!leds_ || !n_) return;
-
+float EffectEngine::frameDt(uint32_t now) {
   float dt = lastNow_ ? (now - lastNow_) / 1000.0f : 0.016f;
   if (dt <= 0.0f || dt > 0.25f) dt = 0.016f;
   lastNow_ = now;
+  return dt;
+}
+
+void EffectEngine::render(const Settings& s, uint32_t now, const AudioFeatures& a) {
+  if (!leds_ || !n_) return;
+  const float dt = frameDt(now);
 
   if (!s.power) {
     fill_solid(leds_, n_, CRGB::Black);
@@ -316,7 +321,7 @@ void EffectEngine::renderCenterVu(const AudioFeatures& a) {
 // Cooling and sparking ranges were tuned for 16 LEDs by simulating the heat
 // model: Fire2012's 30-LED defaults flood a short strip at high level.
 void EffectEngine::renderFire(const Settings& s, const AudioFeatures& a) {
-  const int     n        = min((int)n_, MAX_LEDS);
+  const int     n        = min((int)n_, (int)MAX_LEDS);   // (int): no ODR-use of the constant (C++11)
   const int     cooling  = map(s.trail, 1, 100, 160, 60);
   const uint8_t coolMax  = (uint8_t)min(255, cooling * 10 / max(1, n) + 2);
   const bool    playing  = a.level > 0.0f;
@@ -402,4 +407,94 @@ void EffectEngine::renderStepChase(const Settings& s, const AudioFeatures& a, ui
     const int   i = ((base + k) % n_ + n_) % n_;
     leds_[idx(s, i)] |= scaled(c, w);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Stage screens
+// ---------------------------------------------------------------------------
+
+// Tuner: the two middle LEDs are the target, dim white. A dot shows the
+// note's offset (half the strip = 50 cents): red when far off, amber when
+// close, and the target turns green when within +-3 cents. The end LEDs
+// glow in the note's color so you can see which note the tuner heard.
+void EffectEngine::renderTuner(const Settings& s, uint32_t now, const AudioFeatures& a) {
+  if (!leds_ || !n_) return;
+  const float dt = frameDt(now);
+  static constexpr float NEEDLE_S = 0.12f;   // needle smoothing time
+
+  fill_solid(leds_, n_, CRGB::Black);
+  const int   lo  = (n_ - 1) / 2, hi = n_ / 2;   // middle pair (one LED if n_ is odd)
+  const CRGB  ref = CRGB(14, 14, 14);
+  leds_[idx(s, lo)] = ref;
+  leds_[idx(s, hi)] = ref;
+  if (!a.pitchValid || a.note < 0) {
+    tunerNote_ = -1;
+    return;
+  }
+
+  if (a.note != tunerNote_) {   // new note: jump, do not glide across the scale
+    tunerNote_  = a.note;
+    tunerCents_ = a.cents;
+  } else {
+    tunerCents_ += (a.cents - tunerCents_) * fminf(1.0f, dt / NEEDLE_S);
+  }
+
+  const CRGB noteC = scaled(noteColor(s, a), 0.35f);
+  leds_[idx(s, 0)]      = noteC;
+  leds_[idx(s, n_ - 1)] = noteC;
+
+  switch (tuner::zone(tunerCents_)) {
+    case tuner::Zone::InTune:
+      leds_[idx(s, lo)] = CRGB(0, 255, 40);
+      leds_[idx(s, hi)] = CRGB(0, 255, 40);
+      break;
+    case tuner::Zone::Close:
+      dotAt(s, tuner::position(tunerCents_, n_), CRGB(255, 150, 0));
+      break;
+    case tuner::Zone::Off:
+      dotAt(s, tuner::position(tunerCents_, n_), CRGB(255, 0, 0));
+      break;
+  }
+}
+
+// Battery gauge: the bar grows from LED 0 to the charge level over 0.4 s,
+// green above 50 %, amber 20-50 %, red below. Unknown (no reading yet or
+// monitor not fitted): the middle pair blinks blue twice.
+void EffectEngine::renderBatteryGauge(const Settings& s, uint32_t now, uint32_t startedAt, int percent) {
+  if (!leds_ || !n_) return;
+  frameDt(now);
+  fill_solid(leds_, n_, CRGB::Black);
+  const uint32_t age = now - startedAt;
+
+  if (percent < 0) {
+    const bool on = (age % 500) < 250 && age < 1000;
+    if (on) {
+      leds_[idx(s, (n_ - 1) / 2)] = CRGB(0, 60, 255);
+      leds_[idx(s, n_ / 2)]       = CRGB(0, 60, 255);
+    }
+    return;
+  }
+
+  const CRGB  c    = percent > 50 ? CRGB(0, 255, 40) : (percent >= 20 ? CRGB(255, 150, 0) : CRGB(255, 0, 0));
+  const float grow = fminf(1.0f, age / 400.0f);
+  const float lit  = fmaxf(1.0f, percent / 100.0f * n_) * grow;   // at least one LED when nearly empty
+  for (uint16_t i = 0; i < n_; i++) {
+    leds_[idx(s, i)] = scaled(c, constrain(lit - i, 0.0f, 1.0f));
+  }
+}
+
+// Low: the last LED pulses red for 0.3 s every 10 s. Critical: the last two
+// pulse every 5 s (main.cpp also caps brightness to save the cell).
+void EffectEngine::overlayBatteryWarning(const Settings& s, uint32_t now, BatteryState state) {
+  if (!leds_ || !n_) return;
+  uint32_t period, width;
+  int      count;
+  if (state == BatteryState::Low)           { period = 10000; width = 300; count = 1; }
+  else if (state == BatteryState::Critical) { period = 5000;  width = 400; count = 2; }
+  else return;
+
+  const uint32_t phase = now % period;
+  if (phase >= width) return;
+  const float k = sinf((float)M_PI * phase / width);   // soft on/off
+  for (int j = 0; j < count && j < n_; j++) leds_[idx(s, n_ - 1 - j)] = scaled(CRGB(255, 0, 0), k);
 }

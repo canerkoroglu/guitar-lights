@@ -7,11 +7,20 @@
 #include <FastLED.h>
 #include "Config.h"
 #include "AudioFeatures.h"
+#include "BatteryMonitor.h"
 
 class EffectEngine {
 public:
   void begin(CRGB* leds, uint16_t n) { leds_ = leds; n_ = n; }
   void render(const Settings& s, uint32_t now, const AudioFeatures& a);
+
+  // Stage screens (src/Stage.h), drawn instead of the effect:
+  // Tuner: centre = in tune, flat to the low side, sharp to the high side.
+  void renderTuner(const Settings& s, uint32_t now, const AudioFeatures& a);
+  // Battery gauge: bar grows to the charge level. percent < 0 = unknown.
+  void renderBatteryGauge(const Settings& s, uint32_t now, uint32_t startedAt, int percent);
+  // Low battery reminder drawn over whatever is showing.
+  void overlayBatteryWarning(const Settings& s, uint32_t now, BatteryState state);
 
 private:
   struct Ripple {
@@ -28,6 +37,7 @@ private:
   static constexpr int MAX_COMETS  = 4;
   static constexpr int MAX_LEDS    = 64;   // Fire heat buffer
 
+  float    frameDt(uint32_t now);                             // seconds since the last frame
   uint16_t idx(const Settings& s, int i) const;               // logical -> physical (reverse)
   float    pitchPos(const Settings& s, float midi) const;     // 0..n-1
   void     dotAt(const Settings& s, float pos, const CRGB& c);
@@ -71,4 +81,8 @@ private:
   // Late note: pitch is confirmed a little after the attack that starts it.
   int      youngestRipple_ = -1, youngestComet_ = -1, lastNote_ = -1;
   uint32_t attackAt_ = 0;
+
+  // Tuner: smoothed needle, so the reading is calm enough to tune by.
+  float    tunerCents_ = 0.0f;
+  int      tunerNote_  = -1;
 };

@@ -7,6 +7,8 @@
 #include "TestTone.h"
 #include "Presets.h"
 #include "EffectCatalog.h"
+#include "Stage.h"
+#include "Battery.h"
 #include <ArduinoJson.h>
 
 static WebServer   server(80);
@@ -21,6 +23,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawhtml(<!doctype html>
 <style>
 :root{--bg:#0e0f13;--card:#1a1d24;--line:#2a2f3a;--fg:#e7e9ee;--mut:#8a90a0;--acc:#5b8cff}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 body{margin:0 auto;max-width:560px;padding:16px;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,-apple-system,sans-serif}
 h1{font-size:20px;margin:0 0 2px}
 .sub{color:var(--mut);margin:0 0 16px;font-size:13px}
@@ -64,14 +67,32 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
 .presets{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:6px 0 14px}
 .presets button{padding:10px 4px;font-size:13px;background:#232836;border:1px solid var(--line)}
 .presets button.on{background:var(--acc);border-color:var(--acc)}
+.tuner{display:flex;flex-direction:column;align-items:center;padding:4px 0 14px}
+.tnote{font-size:44px;font-weight:700;line-height:1.1;min-height:1.1em}
+.tcents{font-size:14px;color:var(--mut);min-height:1.4em}
+.tscale{position:relative;width:100%;height:18px;margin-top:6px;border-radius:9px;background:linear-gradient(90deg,#7a2530,#8a6a1a 35%,#1f5f3a 47%,#1f5f3a 53%,#8a6a1a 65%,#7a2530)}
+.tscale b{position:absolute;top:-3px;width:4px;height:24px;margin-left:-2px;border-radius:2px;background:#fff;left:50%;transition:left .12s;display:none}
+.tnote.in{color:#3ddc84}
+.chip.warn{background:#8a6a1a}
 @media (max-width:420px){.notes{grid-template-columns:repeat(4,1fr)}}
 </style></head><body>
 <h1>Guitar RGB</h1>
-<p class="sub"><span id="ledCount">16</span> &times; WS2812B &middot; <span id="stat">connecting&hellip;</span></p>
+<p class="sub"><span id="ledCount">16</span> &times; WS2812B &middot; <span id="stat">connecting&hellip;</span><span id="batHead"></span></p>
 
 <div class="card">
   <h2>Live</h2>
   <div class="strip" id="strip"></div>
+</div>
+
+<div class="card">
+  <h2>Tuner</h2>
+  <div class="row"><span>Tuner on the LEDs</span><label class="sw"><input type="checkbox" id="tunerOn" data-local><i></i></label></div>
+  <div class="tuner" id="tunerView" hidden>
+    <div class="tnote" id="tNote">&ndash;</div>
+    <div class="tcents" id="tCents">play a single note</div>
+    <div class="tscale"><b id="tNeedle"></b></div>
+  </div>
+  <p class="hint">Also: long press the mode button. In tune = the two middle LEDs turn green.</p>
 </div>
 
 <div class="card">
@@ -131,6 +152,15 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
   <div class="row"><span>Attack threshold<small id="attackDbV"></small></span><input type="range" id="attackDb" min="2" max="30"></div>
   <div class="row"><span>Pitch confidence<small id="pitchConfV"></small></span><input type="range" id="pitchConf" min="50" max="99"></div>
   <p class="hint">Noise gate: anything quieter counts as silence. Full scale: this loud lights every LED. Release: how fast the level falls. Attack threshold: how sharp a jump counts as a pick; lower is more sensitive. Pitch confidence: how clean a note must be before its pitch is used; lower accepts messier notes.</p>
+</div>
+
+<div class="card">
+  <h2>Battery</h2>
+  <div class="row"><span>Battery monitor fitted</span><label class="sw"><input type="checkbox" id="batteryFitted"><i></i></label></div>
+  <div class="row batrow"><span>Charge</span><b class="chip" id="batState">&ndash;</b></div>
+  <div class="row batrow"><span>Calibration<small id="batteryTrimV"></small></span><input type="range" id="batteryTrim" min="-300" max="300" step="10"></div>
+  <div class="row batrow"><span>Show on LEDs</span><button id="batShow">Show</button></div>
+  <p class="hint">Needs a 100k/100k divider from the cell to GPIO35 (readme &ldquo;Battery monitor&rdquo;). Calibration: measure the cell with a multimeter and move the slider until the reading matches. Hold the mode button 2 s to see the charge on the LEDs.</p>
 </div>
 
 <div class="card">
@@ -194,6 +224,9 @@ function fill(c){
   $("testAuto").checked=c.test.auto;
   $("testLevel").value=Math.round(c.test.level*100);
   $("testNote").value=c.test.note;
+  $("batteryFitted").checked=c.battery.fitted;
+  $("batteryTrim").value=c.battery.trimMv;
+  batRows();
   desc();
   labels();
 }
@@ -203,6 +236,8 @@ function labels(){
   $("speedV").textContent=$("speed").value;
   $("trailV").textContent=$("trail").value;
   $("testLevelV").textContent=$("testLevel").value+" %";
+  const tr=+$("batteryTrim").value;
+  $("batteryTrimV").textContent=(tr>0?"+":"")+tr+" mV";
   $("gateDbV").textContent=$("gateDb").value+" dB";
   $("fullDbV").textContent=$("fullDb").value+" dB";
   $("releaseMsV").textContent=$("releaseMs").value+" ms";
@@ -224,6 +259,8 @@ function patchFor(el){
     case "testAuto":return {test:{auto:v}};
     case "testLevel":return {test:{level:+v/100}};
     case "testNote":return {test:{note:+v}};
+    case "batteryFitted":return {battery:{fitted:v}};
+    case "batteryTrim":return {battery:{trimMv:+v}};
     case "brightness":case "mode":case "speed":case "trail":case "source":
     case "releaseMs":case "attackDb":case "pitchConf":return {[id]:+v};
   }
@@ -241,6 +278,32 @@ function merge(a,b){
 }
 
 function status(t){$("stat").textContent=t;}
+
+// Battery rows only make sense with the divider fitted.
+function batRows(){document.querySelectorAll(".batrow").forEach(r=>r.hidden=!$("batteryFitted").checked);}
+
+function showBattery(b){
+  const c=$("batState");
+  if(!b||!b.fitted){$("batHead").textContent="";c.textContent="–";c.className="chip";return;}
+  if(b.state==="unknown"){$("batHead").textContent="";c.textContent="No reading yet";c.className="chip info";return;}
+  $("batHead").textContent=` · battery ${b.pct} %`;
+  c.textContent=`${b.pct} % · ${b.v.toFixed(2)} V`+(b.state==="ok"?"":b.state==="low"?" · low":" · critical")+
+    (b.bootOnly?" · read at boot only":"");
+  c.className="chip "+(b.state==="ok"?"ok":b.state==="low"?"warn":"bad");
+}
+
+// Tuner readout: note name, cents and a needle (half the scale = 50 cents).
+function showTuner(d){
+  $("tunerOn").checked=d.tuner;
+  $("tunerView").hidden=!d.tuner;
+  if(!d.tuner)return;
+  const n=$("tNote"),c=$("tCents"),k=$("tNeedle");
+  if(d.note<0){n.textContent="–";n.classList.remove("in");c.textContent="play a single note";k.style.display="none";return;}
+  const ct=Math.max(-50,Math.min(50,d.cents)),inTune=Math.abs(d.cents)<=3;
+  n.textContent=name(d.note);n.classList.toggle("in",inTune);
+  c.textContent=inTune?"in tune":`${d.cents>0?"+":""}${Math.round(d.cents)} cents · ${d.cents>0?"sharp":"flat"}`;
+  k.style.display="block";k.style.left=(50+ct)+"%";
+}
 
 async function send(){
   clearTimeout(timer);
@@ -273,6 +336,7 @@ function onEdit(e){
   if(e.target===$("pitchLow")||e.target===$("pitchHigh"))fixRange(e.target);
   if(e.target===$("gateDb")||e.target===$("fullDb"))fixDb(e.target);
   if(e.target===$("mode"))desc();
+  if(e.target===$("batteryFitted"))batRows();
   labels();
   document.querySelectorAll("#presets button.on").forEach(b=>b.classList.remove("on"));
   queue(patchFor(e.target));
@@ -328,6 +392,8 @@ async function poll(){
         const a=$("attackDot");a.classList.add("on");setTimeout(()=>a.classList.remove("on"),150);
       }
       lastAttacks=d.attacks;
+      showTuner(d);
+      showBattery(d.bat);
     }catch(e){}
   }
   setTimeout(poll,150);
@@ -379,6 +445,8 @@ document.addEventListener("input",onEdit);
 document.addEventListener("change",onEdit);
 $("tone").onchange=e=>fetch("/api/tone?on="+(e.target.checked?1:0),{method:"POST"}).catch(()=>status("offline"));
 $("save").onclick=send;
+$("tunerOn").onchange=e=>fetch("/api/tuner?on="+(e.target.checked?1:0),{method:"POST"}).catch(()=>status("offline"));
+$("batShow").onclick=()=>fetch("/api/battery/show",{method:"POST"}).catch(()=>status("offline"));
 $("pluck").onclick=()=>fetch("/api/pluck",{method:"POST"}).catch(()=>status("offline"));
 $("reset").onclick=async()=>{
   if(!confirm("Reset all LED settings to defaults?"))return;
@@ -455,17 +523,23 @@ static void handlePreset() {
 
 static void handleLeds() {
   String out;
-  out.reserve(ledCount * 10 + 160);
+  out.reserve(ledCount * 10 + 260);
   out += "{\"leds\":[";
   char b[160];
   for (uint16_t i = 0; i < ledCount; i++) {
     snprintf(b, sizeof(b), "%s\"#%02x%02x%02x\"", i ? "," : "", ledBuf[i].r, ledBuf[i].g, ledBuf[i].b);
     out += b;
   }
-  const AudioDsp::Snapshot d = AudioDsp::snapshot();
+  const AudioDsp::Snapshot d   = AudioDsp::snapshot();
+  const Battery::Status    bat = Battery::status();
   snprintf(b, sizeof(b),
-           "],\"level\":%.3f,\"db\":%.1f,\"rise\":%.1f,\"attacks\":%u,\"note\":%d,\"cents\":%.1f,\"conf\":%.2f}",
+           "],\"level\":%.3f,\"db\":%.1f,\"rise\":%.1f,\"attacks\":%u,\"note\":%d,\"cents\":%.1f,\"conf\":%.2f",
            d.level, d.db, d.rise, (unsigned)d.attacks, d.pitchValid ? d.note : -1, d.cents, d.confidence);
+  out += b;
+  snprintf(b, sizeof(b),
+           ",\"tuner\":%s,\"bat\":{\"fitted\":%s,\"state\":\"%s\",\"v\":%.2f,\"pct\":%d,\"bootOnly\":%s}}",
+           Stage::tuner() ? "true" : "false", bat.fitted ? "true" : "false",
+           BatteryMonitor::name(bat.state), bat.volts, bat.percent, bat.bootOnly ? "true" : "false");
   out += b;
   server.send(200, "application/json", out);
 }
@@ -498,6 +572,16 @@ static void handleAdc() {
   server.send(200, "application/json", out);
 }
 
+static void handleTuner() {
+  Stage::setTuner(server.arg("on") == "1");
+  server.send(200, "application/json", Stage::tuner() ? "{\"tuner\":true}" : "{\"tuner\":false}");
+}
+
+static void handleBatteryShow() {
+  Stage::showBatteryGauge(millis());
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
 static void handleTone() {
   TestTone::set(server.arg("on") == "1");
   server.send(200, "application/json", TestTone::active() ? "{\"tone\":true}" : "{\"tone\":false}");
@@ -518,6 +602,8 @@ void webPortalBegin(const CRGB* leds, uint16_t numLeds) {
   server.on("/api/tone",   HTTP_POST, handleTone);
   server.on("/api/presets", HTTP_GET, handlePresets);
   server.on("/api/effects", HTTP_GET, handleEffects);
+  server.on("/api/tuner",   HTTP_POST, handleTuner);
+  server.on("/api/battery/show", HTTP_POST, handleBatteryShow);
   server.on("/api/preset", HTTP_POST, handlePreset);
   server.onNotFound(handleRoot);   // any other path shows the UI
   server.begin();

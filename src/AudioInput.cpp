@@ -28,6 +28,8 @@ namespace {
 
 constexpr i2s_port_t     I2S_PORT  = I2S_NUM_0;
 constexpr adc1_channel_t CHANNEL   = ADC1_CHANNEL_6;   // GPIO34
+constexpr adc1_channel_t BAT_CHAN  = ADC1_CHANNEL_7;   // GPIO35
+constexpr int            DMA_COUNT = 4;                // DMA buffers
 constexpr uint32_t       I2S_RATE  = AudioInput::SAMPLE_RATE * 2;
 constexpr size_t         DMA_LEN   = 512;              // raw samples per DMA buffer (16 ms)
 constexpr uint32_t       WINDOW_US = 250000;           // statistics window
@@ -42,8 +44,38 @@ uint16_t          ring[AudioInput::SCOPE_LEN] = {};
 size_t            ringPos = 0;
 uint16_t          rawLo = 0, rawHi = 4095;
 
+volatile bool          batteryRequested = false;
+volatile uint32_t      batteryReadAt    = 0;   // millis() of the last runtime read
+volatile uint32_t      blocks           = 0;   // completed blocks, for the stall watchdog
+AudioInput::BatteryPin batteryPublished = {0, 0};
+
 float rawToV(int raw) {
   return esp_adc_cal_raw_to_voltage((uint32_t)constrain(raw, 0, 4095), &cal) / 1000.0f;
+}
+
+// Battery pin through the ADC1 RTC controller: 16 samples, the middle 8
+// averaged (rejects spikes). Only call while I2S does not own ADC1.
+uint32_t readBatteryPinMv() {
+  constexpr int N = 16;
+  int s[N];
+  for (int i = 0; i < N; i++) s[i] = adc1_get_raw(BAT_CHAN);
+  for (int i = 1; i < N; i++) {   // insertion sort, N is tiny
+    const int v = s[i];
+    int j = i - 1;
+    while (j >= 0 && s[j] > v) { s[j + 1] = s[j]; j--; }
+    s[j + 1] = v;
+  }
+  int sum = 0;
+  for (int i = N / 4; i < N - N / 4; i++) sum += s[i];
+  const int raw = sum / (N / 2);
+  return raw > 0 ? esp_adc_cal_raw_to_voltage((uint32_t)raw, &cal) : 0;
+}
+
+void publishBattery(uint32_t mv) {
+  portENTER_CRITICAL(&mux);
+  batteryPublished.mv = mv;
+  batteryPublished.seq++;
+  portEXIT_CRITICAL(&mux);
 }
 
 void audioTask(void*) {
@@ -58,9 +90,28 @@ void audioTask(void*) {
   double   sum = 0.0, sumSq = 0.0;
   uint32_t winStart = micros();
 
+  int  dropBlocks    = 0;       // blocks to discard after a battery read
+  bool restartWindow = false;
+
   for (;;) {
     size_t bytes = 0;
     if (i2s_read(I2S_PORT, dma, sizeof(dma), &bytes, portMAX_DELAY) != ESP_OK) continue;
+    blocks++;
+
+    // After a battery read the DMA ring still holds samples taken while
+    // ADC1 was away: skip them so the DSP never sees that step.
+    if (dropBlocks > 0) {
+      dropBlocks--;
+      continue;
+    }
+    if (restartWindow) {   // the gap would distort rate and level statistics
+      restartWindow = false;
+      n = clipped = crossings = 0;
+      mn = 4095;
+      mx = 0;
+      sum = sumSq = 0.0;
+      winStart = micros();
+    }
 
     // 32 kHz -> 16 kHz: average each pair. Top 4 bits carry the channel number.
     const size_t count = bytes / (2 * sizeof(uint16_t));
@@ -95,6 +146,18 @@ void audioTask(void*) {
     n += count;
 
     AudioDsp::process(ac, count, settings, simulated);
+
+    // Battery read only in silence: the ~80 ms gap is invisible there.
+    if (batteryRequested && AudioDsp::snapshot().db < settings.gateDb) {
+      batteryRequested = false;
+      batteryReadAt    = millis() | 1;   // never 0
+      i2s_adc_disable(I2S_PORT);
+      const uint32_t mv = readBatteryPinMv();
+      i2s_adc_enable(I2S_PORT);   // restores the I2S ADC pattern for GPIO34
+      publishBattery(mv);
+      dropBlocks    = DMA_COUNT + 1;
+      restartWindow = true;
+    }
 
     portENTER_CRITICAL(&mux);
     for (size_t i = 0; i < count; i++) {
@@ -139,6 +202,14 @@ void audioTask(void*) {
 }  // namespace
 
 bool AudioInput::begin() {
+  // Calibration first: the boot battery reading below needs it.
+  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, &cal);
+
+  // First battery reading, while ADC1 is still free (before I2S takes it).
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(BAT_CHAN, ADC_ATTEN_DB_11);
+  publishBattery(readBatteryPinMv());
+
   i2s_config_t cfg = {};
   cfg.mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN);
   cfg.sample_rate          = I2S_RATE;
@@ -146,7 +217,7 @@ bool AudioInput::begin() {
   cfg.channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT;
   cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
   cfg.intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1;
-  cfg.dma_buf_count        = 4;
+  cfg.dma_buf_count        = DMA_COUNT;
   cfg.dma_buf_len          = DMA_LEN;
   cfg.use_apll             = false;
 
@@ -157,7 +228,6 @@ bool AudioInput::begin() {
   if (i2s_set_adc_mode(ADC_UNIT_1, CHANNEL) != ESP_OK) return false;
   if (i2s_adc_enable(I2S_PORT) != ESP_OK) return false;
 
-  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, &cal);
   // Raw limits of the range Espressif specifies as accurate at 11 dB.
   while (rawLo < 4095 && rawToV(rawLo) < 0.150f) rawLo++;
   while (rawHi > 0 && rawToV(rawHi) > 2.450f) rawHi--;
@@ -187,3 +257,16 @@ size_t AudioInput::scope(uint16_t* out, size_t n) {
   portEXIT_CRITICAL(&mux);
   return n;
 }
+
+void AudioInput::requestBatteryRead() { batteryRequested = true; }
+
+AudioInput::BatteryPin AudioInput::batteryPin() {
+  portENTER_CRITICAL(&mux);
+  const BatteryPin b = batteryPublished;
+  portEXIT_CRITICAL(&mux);
+  return b;
+}
+
+uint32_t AudioInput::lastBatteryReadMs() { return batteryReadAt; }
+
+uint32_t AudioInput::blockCount() { return blocks; }

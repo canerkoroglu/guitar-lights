@@ -66,6 +66,10 @@ struct Settings {
   bool     testAuto;           // auto-play
   float    testLevel;          // 0..1 pick strength for manual notes and Pluck
   int8_t   testNote;           // -1 = none, else MIDI note (45 = A2)
+
+  // Battery monitor (Phase 9): 100k/100k divider from the cell to GPIO35
+  bool     batteryFitted;      // false = no divider wired, hide all battery UI
+  int16_t  batteryTrimMv;      // added to the measured cell voltage (calibration)
 };
 
 enum AudioSource : uint8_t {

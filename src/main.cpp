@@ -2,7 +2,8 @@
  * Guitar Reactive RGB LED System — ESP32-WROOM-32
  * ------------------------------------------------------------------
  * Current stage: Phases 0-4 (LEDs, Wi-Fi portal, guitar input, VU level,
- * attacks, pitch detection) and the effect engine with presets.
+ * attacks, pitch detection), the effect engine with presets, the Phase 8
+ * mode button with tuner, and the Phase 9 battery monitor.
  *
  * Boot:
  *   1. Quick LED self test (Red -> Green -> Blue -> Off).
@@ -27,11 +28,17 @@
  *   adc     print guitar input statistics (GPIO34)
  *   scope   print the latest 512 raw ADC samples (blocks loop ~0.2 s)
  *   tone on / tone off   DAC test tone on GPIO26 for the loopback test
+ *   tuner on / tuner off
+ *   bat     print battery monitor state (pin mV, cell V, %, state)
+ *   press short | press long | press hold   act as the mode button
  *
  * Wiring (readme.md pin plan):
  *   ESP32 GPIO18 --[330ohm]--> WS2812B DIN   (resistor near first LED)
  *   External 5V -------------> WS2812B 5V     (1000uF across 5V/GND)
  *   GND (common with ESP32) -> WS2812B GND
+ *   ESP32 GPIO25 --[button]--> GND            (mode button, internal pull-up)
+ *   Cell + --[100k]-- GPIO35 --[100k]-- GND   (optional battery monitor,
+ *                                              100nF from GPIO35 to GND)
  */
 
 #include <Arduino.h>
@@ -47,6 +54,8 @@
 #include "EffectEngine.h"
 #include "WebPortal.h"
 #include "Presets.h"
+#include "Stage.h"
+#include "Battery.h"
 
 // ---- Hardware ----
 static constexpr uint8_t  LED_DATA_PIN = 18;   // GPIO18 -> WS2812B DIN
@@ -62,8 +71,14 @@ static const char* MDNS_NAME = "guitar";       // http://guitar.local/
 static constexpr uint32_t FRAME_MS     = 16;   // ~60 FPS
 static constexpr uint32_t HEARTBEAT_MS = 5000;
 
+// Tuner and battery gauge stay visible even at very low brightness or with
+// the lights switched off; a critical battery caps brightness to save it.
+static constexpr uint8_t STAGE_MIN_BRIGHTNESS = 24;
+static constexpr uint8_t CRITICAL_BRIGHTNESS  = 48;
+
 CRGB         leds[NUM_LEDS];
 EffectEngine engine;
+static bool  audioRunning = false;   // AudioInput::begin() succeeded
 
 static void quickSelfTest() {
   const CRGB seq[] = {CRGB::Red, CRGB::Green, CRGB::Blue};
@@ -96,9 +111,35 @@ static AudioFeatures readAudioFeatures() {
   a.pitchValid     = d.pitchValid;
   a.midiNote       = d.midi;
   a.note           = d.note;
+  a.cents          = d.cents;
   a.pitchVelocity  = d.velocity;
   seenAttacks = d.attacks;
   return a;
+}
+
+// The audio task completes a block every 16 ms. If it stops for 1.5 s the
+// LEDs would freeze, so restart the board (back in ~2 s). If the stall
+// followed a runtime battery read, stop doing those first: the I2S ADC
+// hand-over is the one driver path the firmware cannot fully prove.
+static void audioWatchdog(uint32_t now) {
+  static constexpr uint32_t STALL_MS = 1500;
+  static uint32_t lastBlocks = 0, lastProgress = 0;
+  if (!audioRunning) return;
+  const uint32_t b = AudioInput::blockCount();
+  if (b != lastBlocks || lastProgress == 0) {
+    lastBlocks   = b;
+    lastProgress = now;
+    return;
+  }
+  if (now - lastProgress < STALL_MS) return;
+
+  const uint32_t readAt = AudioInput::lastBatteryReadMs();
+  const bool afterBatteryRead = readAt && now - readAt < STALL_MS + 1000;
+  Serial.printf("[watchdog] audio stalled%s, restarting\n", afterBatteryRead ? " after a battery read" : "");
+  if (afterBatteryRead) Battery::disableRuntimeReads();
+  ConfigStore::save();   // keep a change made in the last 2 s
+  Serial.flush();
+  ESP.restart();
 }
 
 static void handleSerial() {
@@ -155,8 +196,22 @@ static void handleSerial() {
     } else if (line == "tone on" || line == "tone off") {
       TestTone::set(line == "tone on");
       Serial.println(F("ok"));
+    } else if (line == "tuner on" || line == "tuner off") {
+      Stage::setTuner(line == "tuner on");
+      Serial.println(F("ok"));
+    } else if (line == "bat") {
+      const Battery::Status b = Battery::status();
+      Serial.printf("bat fitted=%d pin=%umV cell=%.3fV pct=%d state=%s%s\n", b.fitted, (unsigned)b.pinMv,
+                    b.volts, b.percent, BatteryMonitor::name(b.state), b.bootOnly ? " (boot reading only)" : "");
+    } else if (line == "press short" || line == "press long" || line == "press hold") {
+      const ButtonGesture::Event e = line == "press short" ? ButtonGesture::SHORT_PRESS
+                                   : line == "press long"  ? ButtonGesture::LONG_PRESS
+                                                           : ButtonGesture::HOLD;
+      Stage::handle(e, millis());
+      Serial.println(F("ok"));
     } else if (line.length()) {
-      Serial.println(F("commands: {json} | cfg | presets | preset N | leds | pluck | feat | adc | scope | tone on | tone off"));
+      Serial.println(F("commands: {json} | cfg | presets | preset N | leds | pluck | feat | adc | scope | "
+                       "tone on|off | tuner on|off | bat | press short|long|hold"));
     }
     line = "";
   }
@@ -180,6 +235,8 @@ void setup() {
 
   ConfigStore::begin();
   engine.begin(leds, NUM_LEDS);
+  Stage::begin();
+  Battery::begin();
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
@@ -187,7 +244,8 @@ void setup() {
 
   webPortalBegin(leds, NUM_LEDS);
 
-  if (AudioInput::begin()) {
+  audioRunning = AudioInput::begin();
+  if (audioRunning) {
     Serial.printf("Guitar input: I2S ADC on GPIO%d @ %u Hz\n",
                   AudioInput::ADC_GPIO, (unsigned)AudioInput::SAMPLE_RATE);
   } else {
@@ -205,22 +263,44 @@ void loop() {
   ConfigStore::loop();   // deferred settings save
 
   const uint32_t now = millis();
+  Stage::loop(now);                          // mode button
+  Battery::loop(ConfigStore::get(), now);
+  audioWatchdog(now);
   static uint32_t lastFrame = 0;
   static uint32_t lastBeat  = 0;
 
   if (now - lastFrame >= FRAME_MS) {
     lastFrame = now;
-    const Settings& s = ConfigStore::get();
-    engine.render(s, now, readAudioFeatures());
-    FastLED.setBrightness(s.power ? s.brightness : 0);
+    const Settings&       s     = ConfigStore::get();
+    const AudioFeatures   audio = readAudioFeatures();   // every frame: consumes attacks
+    const Battery::Status bat   = Battery::status();
+
+    bool stageScreen = true;
+    if (Stage::gaugeActive(now)) {
+      engine.renderBatteryGauge(s, now, Stage::gaugeStartedAt(), bat.fitted ? bat.percent : -1);
+    } else if (Stage::tuner()) {
+      engine.renderTuner(s, now, audio);
+    } else {
+      engine.render(s, now, audio);
+      stageScreen = false;
+    }
+    if (bat.fitted) engine.overlayBatteryWarning(s, now, bat.state);
+
+    uint8_t brightness = s.power ? s.brightness : 0;
+    if (stageScreen) brightness = max(s.brightness, STAGE_MIN_BRIGHTNESS);
+    if (bat.fitted && bat.state == BatteryState::Critical) brightness = min(brightness, CRITICAL_BRIGHTNESS);
+    FastLED.setBrightness(brightness);
     FastLED.show();
   }
 
   if (now - lastBeat >= HEARTBEAT_MS) {
     lastBeat = now;
     const AudioInput::Stats a = AudioInput::stats();
-    Serial.printf("[hb] up=%lus clients=%d heap=%u | adc %.0fHz dc=%.2fV p2p=%.3fV clip=%u | dsp %.1f%%\n",
+    const Battery::Status b = Battery::status();
+    Serial.printf("[hb] up=%lus clients=%d heap=%u | adc %.0fHz dc=%.2fV p2p=%.3fV clip=%u | dsp %.1f%%",
                   now / 1000UL, WiFi.softAPgetStationNum(), ESP.getFreeHeap(),
                   a.sampleRate, a.dcV, a.p2pV, (unsigned)a.clipped, AudioDsp::snapshot().cpu);
+    if (b.fitted) Serial.printf(" | bat %.2fV %d%% %s", b.volts, b.percent, BatteryMonitor::name(b.state));
+    Serial.println();
   }
 }
