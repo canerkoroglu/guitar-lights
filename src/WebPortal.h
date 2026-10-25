@@ -3,8 +3,11 @@
  *
  *   GET  /            -> control page
  *   GET  /api/config  -> current Settings as JSON
- *   POST /api/config  -> merge JSON into Settings, apply live
+ *   POST /api/config  -> merge JSON into Settings, apply live (partial bodies
+ *                        allowed; the page sends only what changed)
  *                        (saved to NVS after 2 s of no further changes)
+ *   GET  /api/effects -> {"effects":[{"mode","group","name","desc","uses"}, ...]}
+ *                        in menu order; the page builds its effect list from it
  *   GET  /api/presets -> {"presets":["Classic VU", ...]}
  *   POST /api/preset?i=N -> apply preset N, return the full settings JSON
  *   POST /api/reset   -> restore defaults, save, return them as JSON

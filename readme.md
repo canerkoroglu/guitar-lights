@@ -891,6 +891,7 @@ Notes:
 - Effects that color by note use the **static color** while no pitch is known. Peak flash uses white. Sustain keeps the last note color through its fade.
 - Everything with a direction respects **Reverse**.
 - The page dims the Speed, Trail and Static color rows when the selected effect does not use them.
+- The page sends only the setting you change, so two phones (or a preset applied over serial) do not overwrite each other's other settings.
 - Pitch direction caps band speed so a note jump does not alias into backwards motion, and ignores pitch changes under 1.5 semitones/s so vibrato does not read as movement.
 - Fire's cooling and sparking ranges were tuned for 16 LEDs by simulating the heat model: Fire2012's defaults (made for ~30 LEDs) flood a short strip with heat at high level.
 
@@ -943,6 +944,7 @@ GET  /api/leds     {"leds": [...], "level", "db", "rise", "attacks", "note", "ce
 POST /api/pluck    pick the simulated guitar once
 GET  /api/adc      guitar input stats + latest 512 samples
 POST /api/tone?on=1|0   DAC test tone on GPIO26
+GET  /api/effects  {"effects": [{"mode", "group", "name", "desc", "uses"}, ...]}: the page builds its effect menu from this (src/EffectCatalog.cpp)
 GET  /api/presets  {"presets": ["Classic VU", ...]}
 POST /api/preset?i=N    apply preset N, returns the full settings JSON
 ```

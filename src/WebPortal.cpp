@@ -6,10 +6,8 @@
 #include "AudioInput.h"
 #include "TestTone.h"
 #include "Presets.h"
-
-// The page below hard-codes effect numbers (<select>, DESC[], USES[]).
-// Adding an effect to EffectMode needs matching entries here too.
-static_assert(MODE_COUNT == 20, "Update the effect list in INDEX_HTML (select, DESC, USES)");
+#include "EffectCatalog.h"
+#include <ArduinoJson.h>
 
 static WebServer   server(80);
 static const CRGB* ledBuf   = nullptr;
@@ -69,7 +67,7 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
 @media (max-width:420px){.notes{grid-template-columns:repeat(4,1fr)}}
 </style></head><body>
 <h1>Guitar RGB</h1>
-<p class="sub">16 &times; WS2812B &middot; <span id="stat">connecting&hellip;</span></p>
+<p class="sub"><span id="ledCount">16</span> &times; WS2812B &middot; <span id="stat">connecting&hellip;</span></p>
 
 <div class="card">
   <h2>Live</h2>
@@ -94,39 +92,12 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
 <div class="card">
   <h2>Output</h2>
   <div class="row"><span>Power</span><label class="sw"><input type="checkbox" id="power"><i></i></label></div>
-  <div class="row"><span>Brightness</span><input type="range" id="brightness" min="0" max="255"></div>
+  <div class="row"><span>Brightness<small id="brightnessV"></small></span><input type="range" id="brightness" min="0" max="255"></div>
   <div class="row"><span>Effect</span>
-    <select id="mode">
-      <optgroup label="Ambient">
-        <option value="0">Static color</option>
-        <option value="1">Rainbow</option>
-        <option value="2">Breathing</option>
-        <option value="9">Twinkle</option>
-        <option value="10">Scanner</option>
-        <option value="11">Ocean</option>
-        <option value="12">Lava</option>
-      </optgroup>
-      <optgroup label="Whole strip (audio)">
-        <option value="3">VU meter</option>
-        <option value="4">Pitch color</option>
-        <option value="15">Center VU</option>
-        <option value="13">Peak flash</option>
-        <option value="14">Sustain</option>
-        <option value="16">Fire</option>
-      </optgroup>
-      <optgroup label="Moving along strip (audio)">
-        <option value="5">Pitch position</option>
-        <option value="6">Pitch direction</option>
-        <option value="7">Note flow</option>
-        <option value="8">Ripple</option>
-        <option value="17">Sparkle</option>
-        <option value="18">Comet</option>
-        <option value="19">Step chase</option>
-      </optgroup>
-    </select></div>
+    <select id="mode"></select></div>
   <p class="hint" id="desc"></p>
-  <div class="row"><span>Speed</span><input type="range" id="speed" min="1" max="100"></div>
-  <div class="row"><span>Trail</span><input type="range" id="trail" min="1" max="100"></div>
+  <div class="row"><span>Speed<small id="speedV"></small></span><input type="range" id="speed" min="1" max="100"></div>
+  <div class="row"><span>Trail<small id="trailV"></small></span><input type="range" id="trail" min="1" max="100"></div>
   <div class="row"><span>Static color</span><input type="color" id="staticColor"></div>
 </div>
 
@@ -166,7 +137,7 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
   <h2>Simulated guitar</h2>
   <p class="hint">Used when Source is Simulated guitar. Auto-play picks notes with varied strength, slides and rests. Turn it off to pick a note yourself.</p>
   <div class="row"><span>Auto-play</span><label class="sw"><input type="checkbox" id="testAuto"><i></i></label></div>
-  <div class="row"><span>Pick strength</span><input type="range" id="testLevel" min="0" max="100"></div>
+  <div class="row"><span>Pick strength<small id="testLevelV"></small></span><input type="range" id="testLevel" min="0" max="100"></div>
   <div class="row"><span>Note</span><select id="testNote"></select></div>
   <div class="row"><span>Pick</span><button id="pluck">Pluck</button></div>
 </div>
@@ -178,45 +149,26 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
 
 <script>
 const NOTES=["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-const DESC=[
-  "One color on every LED.",
-  "Rainbow scrolling along the strip.",
-  "Static color slowly fading in and out.",
-  "Number of lit LEDs follows how hard you play.",
-  "Whole strip switches to the color of the current note.",
-  "A dot sits where the note falls between the lowest and highest note, leaving a trail as you move.",
-  "Bands travel up the strip as pitch rises and down as it falls. Holds still on a steady note.",
-  "Each note's color enters at one end and scrolls along, showing what you just played.",
-  "Each pick sends pulses outward from the note's position.",
-  "Random LEDs light in the static color and fade, like stars. Speed: how many. Trail: how long they glow.",
-  "One dot in the static color sweeps end to end with a fading tail.",
-  "Blues and greens drifting slowly along the strip.",
-  "Reds and oranges drifting slowly along the strip.",
-  "VU meter, plus a white flash on every pick.",
-  "Whole strip in the note color: bright on a pick, follows the ringing note, then fades. Trail: fade time.",
-  "Level bar grows from the middle out to both ends.",
-  "Flames rise from the start of the strip; playing and picks feed the fire. Trail: flame height.",
-  "Each pick lights random LEDs in the note color; harder picks, more sparks.",
-  "Each pick launches a comet in the note color; harder picks fly faster.",
-  "A block of 4 LEDs steps along the strip on every pick."
-];
-// Which of Speed (s), Trail (t) and Static color (c) each effect uses, by effect number.
-const USES=["c","s","sc","","","t","st","st","st","stc","stc","s","s","","tc","","t","tc","stc","tc"];
+// Effect list from the firmware (/api/effects): {mode, group, name, desc, uses}.
+// uses: which of Speed (s), Trail (t) and Static color (c) the effect reads.
+let EFFECTS={};
 const $=id=>document.getElementById(id);
 const name=m=>NOTES[m%12]+(Math.floor(m/12)-1);
 const range=(a,b)=>{let s="";for(let m=a;m<=b;m++)s+=`<option value="${m}">${name(m)}</option>`;return s;};
-let timer=null;
+let timer=null, pending={};
 
 $("strip").innerHTML="<b></b>".repeat(16);
 $("notes").innerHTML=NOTES.map((n,i)=>`<label class="note"><input type="color" data-note="${i}">${n}</label>`).join("");
-$("pitchLow").innerHTML=range(28,95);
-$("pitchHigh").innerHTML=range(29,96);
-$("testNote").innerHTML='<option value="-1">none</option>'+range(28,96);
+// Same limits as ConfigStore::fromJson: pitchLow 24..107, pitchHigh 25..108, test note 24..108.
+const MIDI_MIN=24, MIDI_MAX=108;
+$("pitchLow").innerHTML=range(MIDI_MIN,MIDI_MAX-1);
+$("pitchHigh").innerHTML=range(MIDI_MIN+1,MIDI_MAX);
+$("testNote").innerHTML='<option value="-1">none</option>'+range(MIDI_MIN,MIDI_MAX);
 
 // Effect description, and dim the rows the effect ignores.
 function desc(){
-  const m=+$("mode").value, u=USES[m]||"";
-  $("desc").textContent=DESC[m]||"";
+  const e=EFFECTS[+$("mode").value]||{}, u=e.uses||"";
+  $("desc").textContent=e.desc||"";
   $("speed").closest(".row").classList.toggle("dim",!u.includes("s"));
   $("trail").closest(".row").classList.toggle("dim",!u.includes("t"));
   $("staticColor").closest(".row").classList.toggle("dim",!u.includes("c"));
@@ -247,6 +199,10 @@ function fill(c){
 }
 
 function labels(){
+  $("brightnessV").textContent=Math.round($("brightness").value/255*100)+" %";
+  $("speedV").textContent=$("speed").value;
+  $("trailV").textContent=$("trail").value;
+  $("testLevelV").textContent=$("testLevel").value+" %";
   $("gateDbV").textContent=$("gateDb").value+" dB";
   $("fullDbV").textContent=$("fullDb").value+" dB";
   $("releaseMsV").textContent=$("releaseMs").value+" ms";
@@ -254,33 +210,55 @@ function labels(){
   $("pitchConfV").textContent=$("pitchConf").value+" %";
 }
 
-function collect(){
-  return {
-    power:$("power").checked, brightness:+$("brightness").value, mode:+$("mode").value,
-    speed:+$("speed").value, trail:+$("trail").value, staticColor:$("staticColor").value,
-    noteColors:[...document.querySelectorAll("[data-note]")].map(el=>el.value),
-    pitchLow:+$("pitchLow").value, pitchHigh:+$("pitchHigh").value, reverse:$("reverse").checked,
-    source:+$("source").value, gateDb:+$("gateDb").value, fullDb:+$("fullDb").value,
-    releaseMs:+$("releaseMs").value, attackDb:+$("attackDb").value, pitchConf:+$("pitchConf").value,
-    test:{auto:$("testAuto").checked, level:+$("testLevel").value/100, note:+$("testNote").value}
-  };
+// Only the setting a control changed is sent (the firmware merges partial
+// updates), so a second phone or a preset applied over serial is not
+// overwritten by this page's older copy of everything else.
+function patchFor(el){
+  const id=el.id, v=el.type==="checkbox"?el.checked:el.value;
+  if(el.dataset.note!==undefined){const nc=[];nc[+el.dataset.note]=el.value;return {noteColors:nc};}  // others null: unchanged
+  switch(id){
+    case "power":case "reverse":return {[id]:v};
+    case "staticColor":return {staticColor:v};
+    case "pitchLow":case "pitchHigh":return {pitchLow:+$("pitchLow").value,pitchHigh:+$("pitchHigh").value};
+    case "gateDb":case "fullDb":return {gateDb:+$("gateDb").value,fullDb:+$("fullDb").value};
+    case "testAuto":return {test:{auto:v}};
+    case "testLevel":return {test:{level:+v/100}};
+    case "testNote":return {test:{note:+v}};
+    case "brightness":case "mode":case "speed":case "trail":case "source":
+    case "releaseMs":case "attackDb":case "pitchConf":return {[id]:+v};
+  }
+  return null;
+}
+
+// Merge b into a: nested objects merge, sparse arrays keep a's entries where b has none.
+function merge(a,b){
+  for(const k in b){
+    if(Array.isArray(b[k])){a[k]=a[k]||[];b[k].forEach((x,i)=>{if(x!==undefined)a[k][i]=x;});}
+    else if(b[k]&&typeof b[k]==="object"){a[k]=merge(a[k]||{},b[k]);}
+    else a[k]=b[k];
+  }
+  return a;
 }
 
 function status(t){$("stat").textContent=t;}
 
 async function send(){
+  clearTimeout(timer);
+  const body=pending;
+  pending={};
+  if(!Object.keys(body).length){status("applied");return;}
   try{
-    const r=await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(collect())});
+    const r=await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     status(r.ok?"applied":"error "+r.status);
   }catch(e){status("offline");}
 }
-function queue(){clearTimeout(timer);timer=setTimeout(send,120);}
+function queue(p){if(!p)return;merge(pending,p);clearTimeout(timer);timer=setTimeout(send,120);}
 
 // Keep highest note above lowest note.
 function fixRange(t){
   const lo=$("pitchLow"),hi=$("pitchHigh");
   if(+hi.value>+lo.value)return;
-  if(t===hi)lo.value=Math.max(28,+hi.value-1);else hi.value=Math.min(96,+lo.value+1);
+  if(t===hi)lo.value=Math.max(MIDI_MIN,+hi.value-1);else hi.value=Math.min(MIDI_MAX,+lo.value+1);
 }
 
 // Keep full scale at least 6 dB above the noise gate.
@@ -297,11 +275,19 @@ function onEdit(e){
   if(e.target===$("mode"))desc();
   labels();
   document.querySelectorAll("#presets button.on").forEach(b=>b.classList.remove("on"));
-  queue();
+  queue(patchFor(e.target));
 }
 
+async function loadEffects(){
+  const d=await (await fetch("/api/effects")).json(), groups={};
+  for(const e of d.effects){EFFECTS[e.mode]=e;(groups[e.group]=groups[e.group]||[]).push(e);}
+  $("mode").innerHTML=Object.keys(groups).map(g=>`<optgroup label="${g}">`+
+    groups[g].map(e=>`<option value="${e.mode}">${e.name}</option>`).join("")+"</optgroup>").join("");
+}
+
+// Effects first: fill() needs the effect options to select the saved one.
 async function load(){
-  try{fill(await (await fetch("/api/config")).json());status("connected");}
+  try{await loadEffects();fill(await (await fetch("/api/config")).json());status("connected");}
   catch(e){status("connection failed");}
 }
 
@@ -316,6 +302,7 @@ $("presets").onclick=async e=>{
   const b=e.target.closest("button");
   if(!b)return;
   clearTimeout(timer);
+  pending={};   // the preset replaces those fields; fill() shows the result
   try{
     const r=await fetch("/api/preset?i="+b.dataset.i,{method:"POST"});
     if(!r.ok)throw new Error(r.status);
@@ -331,7 +318,7 @@ async function poll(){
   if(!document.hidden){
     try{
       const d=await (await fetch("/api/leds")).json(), s=$("strip");
-      if(s.children.length!==d.leds.length)s.innerHTML="<b></b>".repeat(d.leds.length);
+      if(s.children.length!==d.leds.length){s.innerHTML="<b></b>".repeat(d.leds.length);$("ledCount").textContent=d.leds.length;}
       d.leds.forEach((h,i)=>{const b=s.children[i];b.style.background=h;b.style.boxShadow=`0 0 8px ${h}`;});
       $("meter").style.width=(d.level*100).toFixed(0)+"%";
       $("audioStat").textContent=`${d.db.toFixed(1)} dB · onset ${d.rise.toFixed(1)} dB · ${d.attacks} attacks`;
@@ -440,6 +427,23 @@ static void handlePresets() {
   server.send(200, "application/json", out);
 }
 
+static void handleEffects() {
+  JsonDocument doc;
+  JsonArray list = doc["effects"].to<JsonArray>();
+  for (size_t i = 0; i < EffectCatalog::count(); i++) {
+    const EffectCatalog::Info& e = EffectCatalog::at(i);
+    JsonObject o = list.add<JsonObject>();
+    o["mode"]  = (int)e.mode;
+    o["group"] = e.group;
+    o["name"]  = e.name;
+    o["desc"]  = e.desc;
+    o["uses"]  = e.uses;
+  }
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
 static void handlePreset() {
   size_t i = 0;
   if (Presets::parseIndex(server.arg("i").c_str(), i) && Presets::apply(i)) {
@@ -500,6 +504,7 @@ static void handleTone() {
 }
 
 void webPortalBegin(const CRGB* leds, uint16_t numLeds) {
+  if (!EffectCatalog::selfCheck()) Serial.println(F("error: EffectCatalog lists an effect twice"));
   ledBuf   = leds;
   ledCount = numLeds;
 
@@ -512,6 +517,7 @@ void webPortalBegin(const CRGB* leds, uint16_t numLeds) {
   server.on("/api/adc",    HTTP_GET,  handleAdc);
   server.on("/api/tone",   HTTP_POST, handleTone);
   server.on("/api/presets", HTTP_GET, handlePresets);
+  server.on("/api/effects", HTTP_GET, handleEffects);
   server.on("/api/preset", HTTP_POST, handlePreset);
   server.onNotFound(handleRoot);   // any other path shows the UI
   server.begin();

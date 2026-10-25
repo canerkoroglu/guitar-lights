@@ -8,8 +8,8 @@
 #include <Arduino.h>
 
 // Effect modes. Saved settings store the number, so append new modes at the
-// end. Keep in sync with the <select> in WebPortal.cpp and the switch() in
-// EffectEngine.cpp.
+// end. Each mode also needs a case in EffectEngine::render() and an entry
+// in EffectCatalog.cpp (name and description for the web page).
 enum EffectMode : uint8_t {
   // Ambient: no audio needed
   MODE_STATIC = 0,
