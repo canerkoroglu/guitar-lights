@@ -16,4 +16,7 @@ namespace Presets {
   size_t      count();
   const char* name(size_t i);
   bool        apply(size_t i);   // false if i is out of range
+  // Strict decimal index ("3"): false for empty, signed or trailing text,
+  // so "abc" or "2x" cannot silently select preset 0 or 2.
+  bool        parseIndex(const char* text, size_t& i);
 }

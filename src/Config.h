@@ -79,7 +79,8 @@ namespace ConfigStore {
   void      requestSave();                         // persist once changes stop for 2 s
   void      loop();                                // call from loop(): runs the deferred save
   void      setDefaults();                         // reset in-memory to defaults
-  Settings& get();                                 // live reference
+  const Settings& get();                           // live reference: loop task only
+  Settings  snapshot();                            // consistent copy, safe from any task
   String    toJson();                              // serialize current settings
   bool      fromJson(const String& body, String& err); // merge-update from JSON
 }

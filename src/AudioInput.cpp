@@ -33,6 +33,7 @@ constexpr size_t         DMA_LEN   = 512;              // raw samples per DMA bu
 constexpr uint32_t       WINDOW_US = 250000;           // statistics window
 constexpr float          DC_POLE   = 0.995f;           // DC blocker, ~13 Hz corner at 16 kHz
 constexpr float          ZC_HYST   = 12.0f;            // raw LSB hysteresis for zero crossings
+static_assert(DMA_LEN / 2 <= GuitarSynth::MAX_BLOCK, "GuitarSynth must fill a whole block");
 
 esp_adc_cal_characteristics_t cal;
 portMUX_TYPE      mux = portMUX_INITIALIZER_UNLOCKED;
@@ -67,7 +68,7 @@ void audioTask(void*) {
       block[i] = ((dma[2 * i] & 0x0FFF) + (dma[2 * i + 1] & 0x0FFF) + 1) / 2;
     }
 
-    const Settings& settings  = ConfigStore::get();
+    const Settings  settings  = ConfigStore::snapshot();   // this task must not read the live copy
     const bool      simulated = settings.audioSource == SOURCE_SIMULATED;
     if (simulated) GuitarSynth::render(block, count, settings);
 

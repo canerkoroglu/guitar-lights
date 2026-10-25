@@ -1062,6 +1062,7 @@ pio test -e native
 - a second string picked while the first rings
 - sustained note, slide, vibrato: no extra attacks
 - level falls within 0.8 s of muting
+- shared helpers in `lib/dsp/DspMath.h`: one-pole time constant, MIDI <-> Hz
 
 `test/test_pitch` runs the same way through `AudioAnalyzer`:
 

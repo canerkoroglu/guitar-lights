@@ -1,13 +1,10 @@
 #include "EnvelopeDetector.h"
 #include <cmath>
-
-static float onePole(float fs, float ms) {
-  return (ms <= 0.0f) ? 1.0f : 1.0f - std::exp(-1.0f / (fs * ms * 0.001f));
-}
+#include "DspMath.h"
 
 void EnvelopeDetector::configure(float fs, float attackMs, float releaseMs) {
-  aAtt_ = onePole(fs, attackMs);
-  aRel_ = onePole(fs, releaseMs);
+  aAtt_ = dsp::onePoleCoeff(fs, attackMs);
+  aRel_ = dsp::onePoleCoeff(fs, releaseMs);
 }
 
 void EnvelopeDetector::process(const float* x, size_t n) {

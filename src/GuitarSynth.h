@@ -15,10 +15,12 @@
 #include "Config.h"
 
 namespace GuitarSynth {
+  constexpr size_t MAX_BLOCK = 512;   // most samples render() fills per call
+
   void begin(float sampleRate, float biasRaw, float lsbPerVolt);
   void render(uint16_t* raw, size_t n, const Settings& s);   // audio task only
   void pluck();                                               // any task
 
   struct Truth { bool sounding; float midi; };
-  Truth truth();   // pitch being played (stands in for Phase 4 pitch detection)
+  Truth truth();   // note being played: ground truth to check pitch detection against
 }

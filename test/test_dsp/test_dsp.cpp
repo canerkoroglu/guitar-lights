@@ -13,6 +13,7 @@
 #include "EnvelopeDetector.h"
 #include "AttackDetector.h"
 #include "PluckSynth.h"
+#include "DspMath.h"
 
 static constexpr float FS         = 15937.5f;   // actual rate on the ESP32
 static constexpr float FULL_SCALE = 927.0f;     // LSB swing from 1.65 V bias to 2.45 V
@@ -203,6 +204,22 @@ void test_level_falls_after_mute() {
   TEST_ASSERT_EQUAL(1, r.attacks.size());   // muting is not an attack
 }
 
+// Shared helpers: one-pole time constant and MIDI <-> Hz.
+void test_dsp_math_helpers() {
+  // A step through the smoother reaches 1 - 1/e after `ms` milliseconds.
+  const float a = dsp::onePoleCoeff(FS, 10.0f);
+  float y = 0.0f;
+  for (int i = 0; i < (int)std::lround(FS * 0.010f); i++) y += (1.0f - y) * a;
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f - std::exp(-1.0f), y);
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, dsp::onePoleCoeff(FS, 0.0f));   // 0 ms = no smoothing
+
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 440.0f, dsp::midiToHz(69.0f));
+  TEST_ASSERT_FLOAT_WITHIN(1e-2f, 82.41f, dsp::midiToHz(40.0f));   // low E
+  for (float m = 28.0f; m <= 96.0f; m += 0.5f) {
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, m, dsp::hzToMidi(dsp::midiToHz(m)));
+  }
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_silence_gives_no_level_and_no_attacks);
@@ -217,5 +234,6 @@ int main(int, char**) {
   RUN_TEST(test_slide_does_not_trigger);
   RUN_TEST(test_harder_pick_gives_stronger_attack);
   RUN_TEST(test_level_falls_after_mute);
+  RUN_TEST(test_dsp_math_helpers);
   return UNITY_END();
 }

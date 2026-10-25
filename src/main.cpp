@@ -1,7 +1,8 @@
 /*
  * Guitar Reactive RGB LED System — ESP32-WROOM-32
  * ------------------------------------------------------------------
- * Current stage: Phase 1 analog guitar input (+ Phase 0 LEDs, Wi-Fi portal).
+ * Current stage: Phases 0-4 (LEDs, Wi-Fi portal, guitar input, VU level,
+ * attacks, pitch detection) and the effect engine with presets.
  *
  * Boot:
  *   1. Quick LED self test (Red -> Green -> Blue -> Off).
@@ -12,9 +13,9 @@
  * http://192.168.4.1/  (or http://guitar.local/ on macOS/iOS).
  *
  * Audio path: AudioInput (I2S ADC, or GuitarSynth when Source = Simulated
- * guitar) -> DC removal -> AudioDsp (Phase 2 VU level, Phase 3 attacks)
- * -> AudioFeatures -> EffectEngine. Pitch detection is Phase 4; until
- * then the simulated guitar passes through the note it is playing.
+ * guitar) -> DC removal -> AudioDsp (Phase 2 VU level, Phase 3 attacks,
+ * Phase 4 pitch) -> AudioFeatures -> EffectEngine. The simulated guitar's
+ * own note is only reported alongside (feat "truth") to check detection.
  *
  * USB serial commands (115200 baud, one per line):
  *   {json}  apply settings, same format as POST /api/config
@@ -82,6 +83,24 @@ static void printAdc() {
                 (unsigned)a.clipped, a.zeroCrossHz, a.rawLo, a.rawHi, TestTone::active());
 }
 
+// Latest DSP results as the effect engine sees them. Attacks arrive as a
+// counter from the audio task; an attack is "new" for exactly one frame
+// (the refractory period is longer than a frame).
+static AudioFeatures readAudioFeatures() {
+  static uint32_t seenAttacks = 0;
+  const AudioDsp::Snapshot d = AudioDsp::snapshot();
+  AudioFeatures a;
+  a.level          = d.level;
+  a.attackDetected = d.attacks != seenAttacks;
+  a.attackStrength = d.attackStrength;
+  a.pitchValid     = d.pitchValid;
+  a.midiNote       = d.midi;
+  a.note           = d.note;
+  a.pitchVelocity  = d.velocity;
+  seenAttacks = d.attacks;
+  return a;
+}
+
 static void handleSerial() {
   static String line;
   while (Serial.available()) {
@@ -105,9 +124,12 @@ static void handleSerial() {
     } else if (line == "presets") {
       for (size_t i = 0; i < Presets::count(); i++) Serial.printf("%u %s\n", (unsigned)i, Presets::name(i));
     } else if (line.startsWith("preset ")) {
-      const size_t i = (size_t)line.substring(7).toInt();
-      if (Presets::apply(i)) Serial.printf("preset %s\n", Presets::name(i));
-      else                   Serial.println(F("error no such preset"));
+      size_t i = 0;
+      if (Presets::parseIndex(line.c_str() + 7, i) && Presets::apply(i)) {
+        Serial.printf("preset %s\n", Presets::name(i));
+      } else {
+        Serial.println(F("error no such preset"));
+      }
     } else if (line == "leds") {
       for (uint16_t i = 0; i < NUM_LEDS; i++) {
         Serial.printf("%02x%02x%02x ", leds[i].r, leds[i].g, leds[i].b);
@@ -145,7 +167,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println(F("== Guitar RGB : Phase 1 guitar input + web control =="));
+  Serial.println(F("== Guitar RGB : guitar input, audio analysis + web control =="));
   Serial.printf("Chip %s rev %d, %d cores @ %u MHz, heap %u\n",
                 ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores(),
                 ESP.getCpuFreqMHz(), ESP.getFreeHeap());
@@ -189,22 +211,7 @@ void loop() {
   if (now - lastFrame >= FRAME_MS) {
     lastFrame = now;
     const Settings& s = ConfigStore::get();
-
-    // Attacks arrive as a counter from the audio task; an attack is "new"
-    // for exactly one frame (the refractory period is longer than a frame).
-    static uint32_t seenAttacks = 0;
-    const AudioDsp::Snapshot d = AudioDsp::snapshot();
-    AudioFeatures audio;
-    audio.level          = d.level;
-    audio.attackDetected = d.attacks != seenAttacks;
-    audio.attackStrength = d.attackStrength;
-    audio.pitchValid     = d.pitchValid;
-    audio.midiNote       = d.midi;
-    audio.note           = d.note;
-    audio.pitchVelocity  = d.velocity;
-    seenAttacks = d.attacks;
-
-    engine.render(s, now, audio);
+    engine.render(s, now, readAudioFeatures());
     FastLED.setBrightness(s.power ? s.brightness : 0);
     FastLED.show();
   }

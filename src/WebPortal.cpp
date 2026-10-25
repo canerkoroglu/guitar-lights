@@ -7,6 +7,10 @@
 #include "TestTone.h"
 #include "Presets.h"
 
+// The page below hard-codes effect numbers (<select>, DESC[], USES[]).
+// Adding an effect to EffectMode needs matching entries here too.
+static_assert(MODE_COUNT == 20, "Update the effect list in INDEX_HTML (select, DESC, USES)");
+
 static WebServer   server(80);
 static const CRGB* ledBuf   = nullptr;
 static uint16_t    ledCount = 0;
@@ -437,8 +441,8 @@ static void handlePresets() {
 }
 
 static void handlePreset() {
-  const String i = server.arg("i");
-  if (i.length() && Presets::apply((size_t)i.toInt())) {
+  size_t i = 0;
+  if (Presets::parseIndex(server.arg("i").c_str(), i) && Presets::apply(i)) {
     server.send(200, "application/json", ConfigStore::toJson());
   } else {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"no such preset\"}");

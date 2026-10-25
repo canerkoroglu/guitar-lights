@@ -1,13 +1,13 @@
 #include "GuitarSynth.h"
 #include <math.h>
 #include "PluckSynth.h"
+#include "DspMath.h"
 
 namespace {
 
 constexpr float PEAK_V      = 0.5f;   // waveform peak of a full-strength pick
 constexpr float NOISE_LSB   = 3.0f;   // ADC noise, +- LSB
 constexpr float HUM_LSB     = 1.5f;   // 50 Hz pickup hum
-constexpr size_t MAX_BLOCK  = 512;
 
 PluckSynth synth;
 float      fs = 16000.0f, bias = 2000.0f, lsbPerV = 1200.0f;
@@ -24,7 +24,7 @@ float  glideFrom = 52, glideTo = 52;
 
 uint32_t rng = 0x9e3779b9u;
 float    rnd() { rng = rng * 1664525u + 1013904223u; return (rng >> 8) / 16777216.0f; }   // 0..1
-float    hz(float midi) { return 440.0f * powf(2.0f, (midi - 69.0f) / 12.0f); }
+float    hz(float midi) { return dsp::midiToHz(midi); }
 
 void pluckAt(float midi, float strength) {
   noteMidi = midi;
@@ -90,8 +90,8 @@ void GuitarSynth::render(uint16_t* raw, size_t n, const Settings& s) {
     synth.glide(hz(noteMidi));
   }
 
-  static float v[MAX_BLOCK];
-  if (n > MAX_BLOCK) n = MAX_BLOCK;
+  static float v[GuitarSynth::MAX_BLOCK];
+  if (n > GuitarSynth::MAX_BLOCK) n = GuitarSynth::MAX_BLOCK;
   synth.render(v, n);
   for (size_t i = 0; i < n; i++) {
     const double ts = (double)(sampleClock + i) / fs;

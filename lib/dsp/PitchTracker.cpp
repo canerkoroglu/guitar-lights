@@ -1,5 +1,6 @@
 #include "PitchTracker.h"
 #include <cmath>
+#include "DspMath.h"
 
 static constexpr float JUMP    = 1.0f;    // semitones per frame still treated as the same note moving
 static constexpr float AGREE   = 0.75f;   // two frames of a new note must agree this closely
@@ -8,14 +9,14 @@ static constexpr int   CONFIRM = 2;       // frames needed to accept a new note
 void PitchTracker::configure(float frameRateHz, float holdMs, float hysteresisCents,
                              float smoothingMs) {
   const float frameMs = 1000.0f / frameRateHz;
-  alpha_      = 1.0f - std::exp(-frameMs / smoothingMs);
+  alpha_      = dsp::onePoleCoeff(frameRateHz, smoothingMs);
   hyst_       = hysteresisCents / 100.0f;
   holdFrames_ = (int)std::ceil(holdMs / frameMs);
 }
 
 const PitchState& PitchTracker::update(bool found, float hz, float aperiodicity, bool gateOpen) {
   if (found && gateOpen && hz > 0.0f) {
-    const float m = 69.0f + 12.0f * std::log2(hz / 440.0f);
+    const float m = dsp::hzToMidi(hz);
     bool accepted = false;
 
     if (s_.valid && std::fabs(m - s_.midi) <= JUMP) {
@@ -47,7 +48,7 @@ const PitchState& PitchTracker::update(bool found, float hz, float aperiodicity,
         s_.midiNote = nearest;
       }
       s_.cents       = (s_.midi - s_.midiNote) * 100.0f;
-      s_.frequencyHz = 440.0f * std::pow(2.0f, (s_.midi - 69.0f) / 12.0f);
+      s_.frequencyHz = dsp::midiToHz(s_.midi);
       s_.confidence  = 1.0f - aperiodicity;
       return s_;
     }

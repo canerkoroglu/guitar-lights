@@ -1,17 +1,14 @@
 #include "AttackDetector.h"
 #include <cmath>
+#include "DspMath.h"
 
 static constexpr float NLMS_MU        = 0.3f;   // adaptation step (0..2)
 static constexpr float RES_ATTACK_MS  = 0.5f;
 static constexpr float RES_RELEASE_MS = 20.0f;
 
-static float onePole(float fs, float ms) {
-  return 1.0f - std::exp(-1.0f / (fs * ms * 0.001f));
-}
-
 void AttackDetector::configure(float fs, float refractoryMs) {
-  resAtt_ = onePole(fs, RES_ATTACK_MS);
-  resRel_ = onePole(fs, RES_RELEASE_MS);
+  resAtt_ = dsp::onePoleCoeff(fs, RES_ATTACK_MS);
+  resRel_ = dsp::onePoleCoeff(fs, RES_RELEASE_MS);
 
   const float hopMs = HOP * 1000.0f / fs;
   refractoryHops_ = (uint32_t)std::ceil(refractoryMs / hopMs);
