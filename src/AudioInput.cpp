@@ -254,7 +254,7 @@ bool AudioInput::begin() {
 
   if (xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 3, nullptr, 1) != pdPASS) return false;
   // The task enables the ADC itself (see audioTask); wait for its verdict.
-  for (int i = 0; i < 500 && enableState == 0; i++) delay(1);
+  for (int i = 0; i < 2000 && enableState == 0; i++) delay(1);
   return enableState == 1;
 }
 

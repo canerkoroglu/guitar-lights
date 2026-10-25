@@ -311,22 +311,34 @@ function showTuner(d){
   k.style.display="block";k.style.left=(50+ct)+"%";
 }
 
-// A change that did not reach the board (offline, server busy) is kept and
-// retried, so the page never shows a value the LEDs are not using. Edits
-// made in the meantime win over the retried ones.
-async function send(){
+// One update in flight at a time, so an older update can never land after
+// a newer one. A change that did not reach the board (offline, server
+// busy) is kept and retried, so the page never shows a value the LEDs are
+// not using; edits made in the meantime win over the retried ones.
+let inflight=null;
+function send(){
   clearTimeout(timer);
-  const body=pending;
-  pending={};
-  if(!Object.keys(body).length){status("applied");return;}
-  let retry=false;
-  try{
-    const r=await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    status(r.ok?"applied":"error "+r.status);
-    retry=r.status>=500;
-  }catch(e){status("offline, retrying");retry=true;}
-  if(retry){pending=merge(body,pending);clearTimeout(timer);timer=setTimeout(send,1000);}
+  if(inflight)return inflight;          // the running send picks up new edits when it ends
+  if(!Object.keys(pending).length){status("applied");return Promise.resolve();}
+  inflight=(async()=>{
+    for(;;){
+      const body=pending;
+      pending={};
+      let retry=false;
+      try{
+        const r=await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+        status(r.ok?"applied":"error "+r.status);
+        retry=r.status>=500;
+      }catch(e){status("offline, retrying");retry=true;}
+      if(retry){pending=merge(body,pending);timer=setTimeout(send,1000);break;}
+      if(!Object.keys(pending).length)break;   // edits arrived meanwhile: send them now
+    }
+    inflight=null;
+  })();
+  return inflight;
 }
+// Wait until no update is in flight (a retry may be queued in pending).
+async function settle(){while(inflight)await inflight;}
 function queue(p){if(!p)return;merge(pending,p);clearTimeout(timer);timer=setTimeout(send,120);}
 
 // Keep highest note above lowest note.
@@ -378,6 +390,7 @@ $("presets").onclick=async e=>{
   const b=e.target.closest("button");
   if(!b)return;
   // The preset replaces these fields; send any other pending edit first.
+  await settle();
   for(const k of ["mode","speed","trail","staticColor","noteColors"])delete pending[k];
   await send();
   try{
