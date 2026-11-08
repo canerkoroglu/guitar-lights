@@ -443,8 +443,13 @@ function renderPresetPalette(index){
 }
 async function loadPresets(){
   try{
-    const d=await (await fetch("/api/presets")).json();
-    presetsData=d.presets;
+    const [namesResponse,palettesResponse]=await Promise.all([
+      fetch("/api/presets",{cache:"no-store"}),
+      fetch("/api/preset/palettes",{cache:"no-store"})
+    ]);
+    if(!namesResponse.ok||!palettesResponse.ok)throw new Error("preset list unavailable");
+    const names=await namesResponse.json(),paletteData=await palettesResponse.json();
+    presetsData=names.presets.map((name,i)=>({name,colors:paletteData.palettes[i]}));
     $("presets").innerHTML=presetsData.map((p,i)=>`<button data-i="${i}">${p.name}</button>`).join("");
     $("palettePreset").innerHTML=presetsData.map((p,i)=>`<option value="${i}">${p.name}</option>`).join("");
     renderPresetPalette(0);
@@ -671,7 +676,11 @@ pollCalibration();
 </body></html>
 )rawhtml";
 
-static void handleRoot() { server.send_P(200, "text/html", INDEX_HTML); }
+static void handleRoot() {
+  server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  server.sendHeader("Pragma", "no-cache");
+  server.send_P(200, "text/html", INDEX_HTML);
+}
 
 static void handleGetConfig() {
   server.send(200, "application/json", ConfigStore::toJson());
@@ -735,14 +744,23 @@ static void handleReset() {
 }
 
 static void handlePresets() {
-  JsonDocument doc;
-  JsonArray list = doc["presets"].to<JsonArray>();
+  String out = "{\"presets\":[";
   for (size_t i = 0; i < Presets::count(); i++) {
-    JsonObject preset = list.add<JsonObject>();
-    preset["name"] = Presets::name(i);
+    if (i) out += ',';
+    out += '"'; out += Presets::name(i); out += '"';
+  }
+  out += "]}";
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", out);
+}
+
+static void handlePresetPalettes() {
+  JsonDocument doc;
+  JsonArray presets = doc["palettes"].to<JsonArray>();
+  for (size_t i = 0; i < Presets::count(); ++i) {
     RGBColor colors[12];
     Presets::getPalette(i, colors);
-    JsonArray palette = preset["colors"].to<JsonArray>();
+    JsonArray palette = presets.add<JsonArray>();
     for (size_t n = 0; n < 12; ++n) {
       char hex[8];
       snprintf(hex, sizeof(hex), "#%02x%02x%02x", colors[n].r, colors[n].g, colors[n].b);
@@ -751,6 +769,7 @@ static void handlePresets() {
   }
   String out;
   serializeJson(doc, out);
+  server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", out);
 }
 
@@ -931,6 +950,7 @@ void webPortalBegin(CRGB* leds, uint16_t numLeds) {
   server.on("/api/calibrate", HTTP_POST, handleStartCalibration);
   server.on("/api/tone",   HTTP_POST, handleTone);
   server.on("/api/presets", HTTP_GET, handlePresets);
+  server.on("/api/preset/palettes", HTTP_GET, handlePresetPalettes);
   server.on("/api/preset/palette", HTTP_POST, handleSavePresetPalette);
   server.on("/api/effects", HTTP_GET, handleEffects);
   server.on("/api/tuner",   HTTP_POST, handleTuner);
