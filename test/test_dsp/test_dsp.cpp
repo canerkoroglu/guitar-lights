@@ -17,9 +17,10 @@
 
 static constexpr float FS         = 15937.5f;   // actual rate on the ESP32
 static constexpr float FULL_SCALE = 927.0f;     // LSB swing from 1.65 V bias to 2.45 V
-static constexpr float GATE_DB    = -45.0f;
+// Keep the host coverage aligned with the firmware's conservative defaults.
+static constexpr float GATE_DB    = -35.0f;
 static constexpr float FULL_DB    = -6.0f;
-static constexpr float ATTACK_DB  = 6.0f;
+static constexpr float ATTACK_DB  = 10.0f;
 static constexpr float HOP_S      = AttackDetector::HOP / FS;
 
 struct Event {

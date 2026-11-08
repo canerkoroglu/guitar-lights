@@ -35,6 +35,9 @@ constexpr size_t         DMA_LEN   = 512;              // raw samples per DMA bu
 constexpr uint32_t       WINDOW_US = 250000;           // statistics window
 constexpr float          DC_POLE   = 0.995f;           // DC blocker, ~13 Hz corner at 16 kHz
 constexpr float          ZC_HYST   = 12.0f;            // raw LSB hysteresis for zero crossings
+constexpr float          BIAS_MIN_V = 1.40f;            // expected analog-stage DC bias is 1.65 V
+constexpr float          BIAS_MAX_V = 1.90f;
+constexpr uint32_t       CALIBRATION_SAMPLES = (uint32_t)(AudioInput::ACTUAL_RATE * 3.0f);
 static_assert(DMA_LEN / 2 <= GuitarSynth::MAX_BLOCK, "GuitarSynth must fill a whole block");
 
 esp_adc_cal_characteristics_t cal;
@@ -49,6 +52,9 @@ volatile uint32_t      batteryReadAt    = 0;   // millis() of the last runtime r
 volatile uint32_t      blocks           = 0;   // completed blocks, for the stall watchdog
 volatile int           enableState      = 0;   // audio task start: 0 pending, 1 ok, -1 failed
 AudioInput::BatteryPin batteryPublished = {0, 0};
+AudioInput::Calibration calibrationPublished = {false, false, 0, -120.0f, -35};
+volatile bool calibrationRequested = false;
+float fullScaleLsb = 900.0f;
 
 float rawToV(int raw) {
   return esp_adc_cal_raw_to_voltage((uint32_t)constrain(raw, 0, 4095), &cal) / 1000.0f;
@@ -99,6 +105,10 @@ void audioTask(void*) {
   uint16_t mn = 4095, mx = 0;
   double   sum = 0.0, sumSq = 0.0;
   uint32_t winStart = micros();
+  bool     inputBiasValid = false;
+  bool     calibrationActive = false;
+  uint32_t calibrationCount = 0;
+  double   calibrationSumSq = 0.0;
 
   int  dropBlocks    = 0;       // blocks to discard after a battery read
   bool restartWindow = false;
@@ -136,6 +146,16 @@ void audioTask(void*) {
     const bool      simulated = settings.audioSource == SOURCE_SIMULATED;
     if (simulated) GuitarSynth::render(block, count, settings);
 
+    if (calibrationRequested) {
+      calibrationRequested = false;
+      calibrationActive = true;
+      calibrationCount = 0;
+      calibrationSumSq = 0.0;
+      portENTER_CRITICAL(&mux);
+      calibrationPublished = {true, inputBiasValid, 0, -120.0f, settings.gateDb};
+      portEXIT_CRITICAL(&mux);
+    }
+
     for (size_t i = 0; i < count; i++) {
       const uint16_t raw = block[i];
 
@@ -158,6 +178,33 @@ void audioTask(void*) {
     }
     n += count;
 
+    if (calibrationActive) {
+      for (size_t i = 0; i < count; i++) calibrationSumSq += (double)ac[i] * ac[i];
+      calibrationCount += count;
+      if (calibrationCount >= CALIBRATION_SAMPLES) {
+        const float rms = sqrtf((float)(calibrationSumSq / calibrationCount));
+        const float noiseDb = 20.0f * log10f((rms + 1e-3f) / fullScaleLsb);
+        const int suggested = constrain((int)ceilf(noiseDb + 15.0f), -80, -10);
+        portENTER_CRITICAL(&mux);
+        calibrationPublished = {false, inputBiasValid, 100, noiseDb, (int8_t)suggested};
+        portEXIT_CRITICAL(&mux);
+        calibrationActive = false;
+      } else {
+        const uint8_t progress = (uint8_t)(100UL * calibrationCount / CALIBRATION_SAMPLES);
+        portENTER_CRITICAL(&mux);
+        calibrationPublished.progress = progress;
+        calibrationPublished.biasValid = inputBiasValid;
+        portEXIT_CRITICAL(&mux);
+      }
+    }
+
+    // GPIO34 has no internal pull resistor.  If the analog stage has lost
+    // its 1.65 V bias, treat the input as silence instead of letting a
+    // floating pin manufacture attacks.  The validity flag is refreshed
+    // from the calibrated 250 ms statistics window below.
+    if (!simulated && !inputBiasValid) {
+      for (size_t i = 0; i < count; i++) ac[i] = 0.0f;
+    }
     AudioDsp::process(ac, count, settings, simulated);
 
     // Battery read only in silence: the ~80 ms gap is invisible there.
@@ -199,6 +246,12 @@ void audioTask(void*) {
       s.zeroCrossHz = crossings / secs;
       s.rawLo       = rawLo;
       s.rawHi       = rawHi;
+      s.biasValid   = s.dcV >= BIAS_MIN_V && s.dcV <= BIAS_MAX_V;
+
+      // Do not require a connected guitar: a correctly built buffer keeps
+      // the ADC biased while the guitar is unplugged.  This only rejects a
+      // missing/floating analog bias, which is never a playable signal.
+      inputBiasValid = simulated || s.biasValid;
 
       portENTER_CRITICAL(&mux);
       published = s;
@@ -249,8 +302,9 @@ bool AudioInput::begin() {
   int biasRaw = rawLo;
   while (biasRaw < rawHi && rawToV(biasRaw) < 1.650f) biasRaw++;
   const float lsbPerVolt = (rawHi - rawLo) / (2.450f - 0.150f);
+  fullScaleLsb = (float)(rawHi - biasRaw);
   GuitarSynth::begin(ACTUAL_RATE, biasRaw, lsbPerVolt);
-  AudioDsp::begin(ACTUAL_RATE, (float)(rawHi - biasRaw));   // clean swing above bias
+  AudioDsp::begin(ACTUAL_RATE, fullScaleLsb);   // clean swing above bias
 
   if (xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 3, nullptr, 1) != pdPASS) return false;
   // The task enables the ADC itself (see audioTask); wait for its verdict.
@@ -272,6 +326,21 @@ size_t AudioInput::scope(uint16_t* out, size_t n) {
   for (size_t i = 0; i < n; i++) out[i] = ring[(start + i) % SCOPE_LEN];
   portEXIT_CRITICAL(&mux);
   return n;
+}
+
+bool AudioInput::startNoiseCalibration() {
+  portENTER_CRITICAL(&mux);
+  const bool busy = calibrationRequested || calibrationPublished.active;
+  if (!busy) calibrationRequested = true;
+  portEXIT_CRITICAL(&mux);
+  return !busy;
+}
+
+AudioInput::Calibration AudioInput::calibration() {
+  portENTER_CRITICAL(&mux);
+  const Calibration c = calibrationPublished;
+  portEXIT_CRITICAL(&mux);
+  return c;
 }
 
 void AudioInput::requestBatteryRead() { batteryRequested = true; }

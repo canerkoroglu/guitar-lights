@@ -957,6 +957,8 @@ POST /api/battery/show  battery gauge on the LEDs for 2.5 s
 
 The **Guitar input** panel shows a live oscilloscope of GPIO34, DC level, peak-to-peak, RMS, measured sample rate, and a status: OK, No signal, Bias off, Clipping, or Test tone.
 
+It also reports the current DSP dB value and its margin below the noise gate. Use **Quiet calibration** with `Source = Guitar input`, do not touch or play the guitar for three seconds, then choose the proposed gate value. The calibration adds 15 dB above the measured AC RMS noise floor; it never changes the hardware bias requirement.
+
 USB serial commands (115200 baud, one per line), for configuring and testing without Wi-Fi:
 
 ```text
@@ -1058,7 +1060,7 @@ The DSP classes live in `lib/dsp/` as plain C++ (no Arduino). `AudioAnalyzer` ho
 ## Phase 2: VU level
 
 - Peak envelope of the DC-free signal: 2 ms attack, configurable release (default 120 ms).
-- Converted to dB relative to the clean swing above the 1.65V bias (0.8V), then mapped linearly in dB from the **noise gate** (level 0, default -45 dB) to **full scale** (level 1, default -6 dB). dB mapping makes LED steps feel even from soft to hard playing.
+- Converted to dB relative to the clean swing above the 1.65V bias (0.8V), then mapped linearly in dB from the **noise gate** (level 0, default -35 dB) to **full scale** (level 1, default -6 dB). The higher default gate rejects normal ADC and LED-switching noise; set it about 10-15 dB above the measured idle noise floor. dB mapping makes LED steps feel even from soft to hard playing.
 
 ## Phase 3: Attack detection
 
@@ -1067,7 +1069,8 @@ A guitar note is a stack of harmonics, and re-picking a ringing string often bar
 - An adaptive linear predictor (NLMS, 24 taps) learns the current note's harmonic mix and cancels it. Its prediction residual stays small on a ringing note and jumps on an attack.
 - Two smooth envelopes are checked every 4 ms: the residual (catches re-picks in any register) and the broadband level (attacks from silence, palm mutes).
 - Onset value = how much either rose over the last 12 ms. It is large only on the rising edge, so the detector re-arms quickly for fast picking, while ringing notes, slides and vibrato change far less than 1 dB per 12 ms.
-- Fires above the **attack threshold** (default 6 dB) when the level is above the noise gate; re-arms below a third of the threshold; 60 ms refractory period. Attack strength = level at the attack.
+- Fires above the **attack threshold** (default 10 dB) when the level is above the noise gate; re-arms below a third of the threshold; 60 ms refractory period. Attack strength = level at the attack.
+- The gate has 3 dB of close hysteresis: it opens above the configured gate and closes only 3 dB below it. This stops borderline ADC noise from repeatedly opening and closing the audio path.
 - Envelopes, not raw per-hop energy: a 4 ms hop is shorter than one period of low E (12 ms), so raw energy swings several dB with wave phase and re-triggers on a single note.
 
 ## Phase 4: Pitch detection

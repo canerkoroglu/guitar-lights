@@ -77,6 +77,15 @@ enum AudioSource : uint8_t {
   SOURCE_GUITAR    = 1,        // ADC on GPIO34 through the MCP6022 buffer
 };
 
+// Conservative defaults for the real ADC input.  A floating GPIO34 can pick
+// up enough RF and LED-switching noise to cross the former -45 dB / 6 dB
+// settings.  These remain user-adjustable from the Audio panel.
+namespace AudioDefaults {
+  constexpr int8_t  GATE_DB   = -35;
+  constexpr int8_t  FULL_DB   = -6;
+  constexpr uint8_t ATTACK_DB = 10;
+}
+
 namespace ConfigStore {
   void      begin();                               // load from NVS (or defaults)
   void      save();                                // persist current settings now

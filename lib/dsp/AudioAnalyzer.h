@@ -19,15 +19,16 @@
 #include "PitchTracker.h"
 
 struct AnalyzerParams {
-  float gateDb    = -45.0f;   // quieter = silence (level 0, no attacks, no pitch)
+  float gateDb    = -35.0f;   // quieter = silence (level 0, no attacks, no pitch)
   float fullDb    = -6.0f;    // this loud = level 1
   float releaseMs = 120.0f;   // level fall time
-  float attackDb  = 6.0f;     // attack threshold: rise within 12 ms
+  float attackDb  = 10.0f;    // attack threshold: rise within 12 ms
   float pitchConf = 0.85f;    // minimum periodicity for a pitch (1 - YIN threshold)
 };
 
 struct AnalyzerOutput {
   float      level = 0.0f, db = -120.0f, rise = 0.0f;
+  bool       gateOpen = false;       // hysteretic gate state used by attack/pitch
   uint32_t   attacks = 0;          // increments once per attack
   float      attackStrength = 0.0f;
   PitchState pitch;
@@ -42,6 +43,9 @@ public:
   static constexpr float  MAX_HZ       = 1400.0f;// above E6, 24th fret on high E
 
   void configure(float sampleRate, float fullScaleLsb);
+  // Clear temporal state when the physical and simulated sources are swapped.
+  // The buffers stay allocated, so this is safe to call from the audio task.
+  void reset();
   void process(const float* ac, size_t n, const AnalyzerParams& p);
   const AnalyzerOutput& output() const { return out_; }
 
@@ -60,5 +64,6 @@ private:
   size_t             ringPos_ = 0, filled_ = 0, sincePitch_ = 0;
   float              prevMidi_ = 0.0f;
   bool               prevValid_ = false;
+  bool               gateOpen_ = false;
   AnalyzerOutput     out_;
 };

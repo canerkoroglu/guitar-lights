@@ -189,6 +189,28 @@ void test_noise_gives_no_pitch() {
   for (const Frame& x : f) TEST_ASSERT_FALSE_MESSAGE(x.valid, "noise produced a pitch");
 }
 
+void test_gate_hysteresis_rejects_borderline_noise() {
+  AudioAnalyzer an;
+  AnalyzerParams p;
+  p.gateDb = -35.0f;
+  an.configure(FS, FULL);
+  float x[BLOCK];
+
+  // Above the opening threshold, then in the 3 dB hysteresis band, then
+  // below the closing threshold.  This prevents gate chatter at the floor.
+  for (float& v : x) v = FULL * std::pow(10.0f, -34.0f / 20.0f);
+  an.process(x, BLOCK, p);
+  TEST_ASSERT_TRUE(an.output().gateOpen);
+  for (float& v : x) v = FULL * std::pow(10.0f, -36.0f / 20.0f);
+  an.process(x, BLOCK, p);
+  TEST_ASSERT_TRUE(an.output().gateOpen);
+  for (float& v : x) v = FULL * std::pow(10.0f, -39.0f / 20.0f);
+  // The envelope has a 120 ms release, so give it time to cross the
+  // closing threshold instead of testing an instantaneous amplitude.
+  for (int i = 0; i < 32; i++) an.process(x, BLOCK, p);
+  TEST_ASSERT_FALSE(an.output().gateOpen);
+}
+
 void test_latency_from_silence() {
   for (int m : {40, 45, 50, 55, 64}) {
     auto f = run({{0.1, Event::PLUCK, (float)m, 450}}, 0.5);
@@ -258,6 +280,7 @@ int main(int, char**) {
   RUN_TEST(test_inharmonic_strings);
   RUN_TEST(test_out_of_tune_notes_keep_their_name);
   RUN_TEST(test_noise_gives_no_pitch);
+  RUN_TEST(test_gate_hysteresis_rejects_borderline_noise);
   RUN_TEST(test_latency_from_silence);
   RUN_TEST(test_note_change_is_clean_and_fast);
   RUN_TEST(test_vibrato_does_not_flicker);

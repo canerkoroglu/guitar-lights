@@ -20,6 +20,7 @@ static void commit(const Settings& next) {
 // SAVE_DELAY_MS without further changes. Dragging a slider would otherwise
 // hammer the flash with dozens of writes per second.
 static constexpr uint32_t SAVE_DELAY_MS = 2000;
+static constexpr uint8_t CONFIG_VERSION = 2;
 static bool     dirty      = false;
 static uint32_t lastChange = 0;
 
@@ -62,10 +63,10 @@ void ConfigStore::setDefaults() {
   }
 
   d.audioSource = SOURCE_SIMULATED;   // no input circuit yet
-  d.gateDb      = -45;
-  d.fullDb      = -6;
+  d.gateDb      = AudioDefaults::GATE_DB;
+  d.fullDb      = AudioDefaults::FULL_DB;
   d.releaseMs   = 120;
-  d.attackDb    = 6;
+  d.attackDb    = AudioDefaults::ATTACK_DB;
   d.pitchConf   = 85;
 
   d.testAuto  = true;
@@ -94,6 +95,16 @@ void ConfigStore::begin() {
   if (s.length()) {
     String err;
     fromJson(s, err);   // merge saved values over defaults
+    // v1 shipped the overly sensitive -45 dB / 6 dB defaults.  Upgrade
+    // only that exact pair; any differing values are treated as intentional.
+    if (g.gateDb == -45 && g.attackDb == 6) {
+      Settings migrated = snapshot();
+      migrated.gateDb = AudioDefaults::GATE_DB;
+      migrated.attackDb = AudioDefaults::ATTACK_DB;
+      commit(migrated);
+      dirty = true;
+      lastChange = millis();
+    }
   }
 }
 
@@ -113,6 +124,7 @@ void ConfigStore::loop() {
 
 String ConfigStore::toJson() {
   JsonDocument doc;
+  doc["version"]     = CONFIG_VERSION;
   doc["power"]       = g.power;
   doc["brightness"]  = g.brightness;
   doc["mode"]        = g.mode;

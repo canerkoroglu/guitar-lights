@@ -30,11 +30,24 @@ namespace AudioInput {
     uint32_t clipped;       // samples outside the ADC's accurate range in the last window
     float    zeroCrossHz;   // upward zero crossings per second (test metric, not pitch)
     uint16_t rawLo, rawHi;  // raw limits of the accurate range (150..2450 mV)
+    bool     biasValid;     // DC bias is suitable for the analog guitar input
+  };
+
+  // Three-second quiet-input calibration.  It measures the AC RMS before
+  // the DSP gate and proposes a gate 15 dB above that floor.
+  struct Calibration {
+    bool    active;
+    bool    biasValid;
+    uint8_t progress;          // 0..100
+    float   noiseDb;           // RMS, dB re ADC full-scale swing
+    int8_t  suggestedGateDb;
   };
 
   bool   begin();
   Stats  stats();                           // latest 250 ms window, thread-safe copy
   size_t scope(uint16_t* out, size_t n);    // most recent raw samples, oldest first
+  bool   startNoiseCalibration();           // false when a run is already active
+  Calibration calibration();                // thread-safe copy
 
   // Battery pin (Phase 9). ADC1 belongs to the I2S sampler, so the pin can
   // only be read by briefly handing ADC1 back, which drops ~80 ms of

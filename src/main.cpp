@@ -92,9 +92,9 @@ static void quickSelfTest() {
 
 static void printAdc() {
   const AudioInput::Stats a = AudioInput::stats();
-  Serial.printf("adc running=%d rate=%.0f dc=%.3f min=%.3f max=%.3f p2p=%.3f rms=%.4f "
+  Serial.printf("adc running=%d bias=%d rate=%.0f dc=%.3f min=%.3f max=%.3f p2p=%.3f rms=%.4f "
                 "clip=%u zc=%.1f lo=%u hi=%u tone=%d\n",
-                a.running, a.sampleRate, a.dcV, a.minV, a.maxV, a.p2pV, a.rmsV,
+                a.running, a.biasValid, a.sampleRate, a.dcV, a.minV, a.maxV, a.p2pV, a.rmsV,
                 (unsigned)a.clipped, a.zeroCrossHz, a.rawLo, a.rawHi, TestTone::active());
 }
 

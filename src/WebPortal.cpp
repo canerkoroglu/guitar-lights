@@ -105,6 +105,9 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
   <canvas id="scope"></canvas>
   <p class="hint" id="adcStat">Waiting for samples&hellip;</p>
   <div class="row"><span>Status</span><b class="chip" id="adcState">&ndash;</b></div>
+  <div class="row"><span>Noise / gate margin</span><b id="noiseMargin">&ndash;</b></div>
+  <div class="row"><span>Quiet calibration</span><button id="calibrate">Measure</button></div>
+  <p class="hint" id="calStat">Keep the guitar quiet for 3 seconds. The suggested gate is 15 dB above the measured noise floor.</p>
   <div class="row"><span>Zoom to signal</span><label class="sw"><input type="checkbox" id="zoom" data-local checked><i></i></label></div>
   <div class="row"><span>Test tone on GPIO26</span><label class="sw"><input type="checkbox" id="tone" data-local><i></i></label></div>
   <p class="hint">Loopback test: jumper GPIO26 to GPIO34 with nothing else on GPIO34. Remove the jumper before wiring the buffer circuit.</p>
@@ -451,13 +454,16 @@ function drawAdc(d){
   }
   $("adcStat").textContent=`DC ${d.dc.toFixed(3)} V · p-p ${d.p2p.toFixed(3)} V · RMS ${d.rms.toFixed(3)} V · `+
     `${(d.rate/1000).toFixed(2)} kHz · ${d.zc.toFixed(0)} crossings/s · ${(s.length/Math.max(d.rate,1)*1000).toFixed(0)} ms shown`;
-  let st="OK",cls="ok";
+  let st="Signal detected",cls="ok";
   if(!d.running){st="ADC not running";cls="bad";}
   else if(d.clip>0){st=`Clipping (${d.clip} samples)`;cls="bad";}
   else if(d.tone){st="Test tone";cls="info";}
-  else if(d.dc<1.4||d.dc>1.9){st="Bias off (expect ~1.65 V)";cls="bad";}
+  else if(!d.bias){st="Bias off (expect ~1.65 V)";cls="bad";}
   else if(d.p2p<0.02){st="No signal";cls="info";}
+  else if(d.db<d.gate){st="Noise below gate";cls="warn";}
   const c=$("adcState");c.textContent=st;c.className="chip "+cls;
+  const margin=d.gate-d.db;
+  $("noiseMargin").textContent=`${d.db.toFixed(1)} dB / ${margin.toFixed(1)} dB margin`;
   if(!held("tone"))$("tone").checked=d.tone;
 }
 async function pollAdc(){
@@ -467,6 +473,23 @@ async function pollAdc(){
   setTimeout(pollAdc,200);
 }
 
+async function pollCalibration(){
+  if(!document.hidden&&$("inputCard").open){
+    try{
+      const c=await (await fetch("/api/calibrate")).json();
+      if(c.active){$("calibrate").disabled=true;$("calStat").textContent=`Measuring quiet input: ${c.progress}%`;}
+      else if(c.progress===100){
+        $("calibrate").disabled=false;
+        $("calStat").textContent=c.bias
+          ?`Noise floor ${c.noise.toFixed(1)} dB. Suggested gate: ${c.gate} dB.`
+          :"Bias is invalid; repair the analog input before calibrating.";
+        $("calibrate").textContent=c.bias?`Use ${c.gate} dB`:"Measure";
+      } else {$("calibrate").disabled=false;$("calibrate").textContent="Measure";}
+    }catch(e){}
+  }
+  setTimeout(pollCalibration,300);
+}
+
 document.addEventListener("input",onEdit);
 document.addEventListener("change",onEdit);
 $("tone").onchange=e=>(hold("tone"),fetch("/api/tone?on="+(e.target.checked?1:0),{method:"POST"}).catch(()=>status("offline")));
@@ -474,6 +497,20 @@ $("save").onclick=send;
 $("tunerOn").onchange=e=>(hold("tunerOn"),fetch("/api/tuner?on="+(e.target.checked?1:0),{method:"POST"}).catch(()=>status("offline")));
 $("batShow").onclick=()=>fetch("/api/battery/show",{method:"POST"}).catch(()=>status("offline"));
 $("pluck").onclick=()=>fetch("/api/pluck",{method:"POST"}).catch(()=>status("offline"));
+$("calibrate").onclick=async()=>{
+  const suggestion=/Use (-?\d+) dB/.exec($("calibrate").textContent);
+  if(suggestion){
+    $("gateDb").value=+suggestion[1];fixDb($("gateDb"));labels();queue(patchFor($("gateDb")));
+    $("calStat").textContent=`Noise gate set to ${$("gateDb").value} dB.`;
+    $("calibrate").textContent="Measure";return;
+  }
+  if(+$("source").value!==1){$("calStat").textContent="Select Guitar input (GPIO34) first.";return;}
+  try{
+    const r=await fetch("/api/calibrate",{method:"POST"});
+    if(!r.ok)throw new Error(r.status);
+    $("calibrate").disabled=true;$("calStat").textContent="Measuring quiet input: 0%";
+  }catch(e){$("calStat").textContent="Calibration could not start.";}
+};
 $("reset").onclick=async()=>{
   if(!confirm("Reset all LED settings to defaults?"))return;
   try{fill(await (await fetch("/api/reset",{method:"POST"})).json());status("defaults restored");}
@@ -483,6 +520,7 @@ load();
 loadPresets();
 poll();
 pollAdc();
+pollCalibration();
 </script>
 </body></html>
 )rawhtml";
@@ -578,6 +616,8 @@ static void handlePluck() {
 static void handleAdc() {
   static uint16_t s[AudioInput::SCOPE_LEN];
   const AudioInput::Stats a = AudioInput::stats();
+  const AudioDsp::Snapshot d = AudioDsp::snapshot();
+  const Settings settings = ConfigStore::snapshot();
   const size_t n = AudioInput::scope(s, AudioInput::SCOPE_LEN);
 
   String out;
@@ -585,9 +625,10 @@ static void handleAdc() {
   char b[300];
   snprintf(b, sizeof(b),
            "{\"running\":%s,\"rate\":%.1f,\"dc\":%.4f,\"min\":%.4f,\"max\":%.4f,\"p2p\":%.4f,"
-           "\"rms\":%.4f,\"clip\":%u,\"zc\":%.1f,\"lo\":%u,\"hi\":%u,\"tone\":%s,\"s\":[",
+           "\"rms\":%.4f,\"clip\":%u,\"zc\":%.1f,\"lo\":%u,\"hi\":%u,\"bias\":%s,\"db\":%.1f,\"gate\":%d,\"tone\":%s,\"s\":[",
            a.running ? "true" : "false", a.sampleRate, a.dcV, a.minV, a.maxV, a.p2pV,
-           a.rmsV, (unsigned)a.clipped, a.zeroCrossHz, a.rawLo, a.rawHi,
+           a.rmsV, (unsigned)a.clipped, a.zeroCrossHz, a.rawLo, a.rawHi, a.biasValid ? "true" : "false",
+           d.db, settings.gateDb,
            TestTone::active() ? "true" : "false");
   out += b;
   for (size_t i = 0; i < n; i++) {
@@ -596,6 +637,27 @@ static void handleAdc() {
   }
   out += "]}";
   server.send(200, "application/json", out);
+}
+
+static void handleGetCalibration() {
+  const AudioInput::Calibration c = AudioInput::calibration();
+  char out[128];
+  snprintf(out, sizeof(out), "{\"active\":%s,\"bias\":%s,\"progress\":%u,\"noise\":%.1f,\"gate\":%d}",
+           c.active ? "true" : "false", c.biasValid ? "true" : "false",
+           (unsigned)c.progress, c.noiseDb, c.suggestedGateDb);
+  server.send(200, "application/json", out);
+}
+
+static void handleStartCalibration() {
+  if (ConfigStore::snapshot().audioSource != SOURCE_GUITAR) {
+    server.send(409, "application/json", "{\"ok\":false,\"error\":\"select guitar input first\"}");
+    return;
+  }
+  if (!AudioInput::startNoiseCalibration()) {
+    server.send(409, "application/json", "{\"ok\":false,\"error\":\"calibration already running\"}");
+    return;
+  }
+  server.send(202, "application/json", "{\"ok\":true}");
 }
 
 static void handleTuner() {
@@ -625,6 +687,8 @@ void webPortalBegin(const CRGB* leds, uint16_t numLeds) {
   server.on("/api/leds",   HTTP_GET,  handleLeds);
   server.on("/api/pluck",  HTTP_POST, handlePluck);
   server.on("/api/adc",    HTTP_GET,  handleAdc);
+  server.on("/api/calibrate", HTTP_GET, handleGetCalibration);
+  server.on("/api/calibrate", HTTP_POST, handleStartCalibration);
   server.on("/api/tone",   HTTP_POST, handleTone);
   server.on("/api/presets", HTTP_GET, handlePresets);
   server.on("/api/effects", HTTP_GET, handleEffects);
