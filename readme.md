@@ -1,10 +1,24 @@
 # Guitar Reactive RGB LED System
 
+## Firmware Versioning
+
+Firmware releases use Semantic Versioning (`MAJOR.MINOR.PATCH`). The current
+version is defined in `src/FirmwareVersion.h` and exposed by `GET /api/version`.
+The web interface queries that endpoint without caching and shows the version
+with an online indicator, confirming which firmware is serving the page.
+
+Before each firmware release, update the version in `src/FirmwareVersion.h`:
+
+- Increase **MAJOR** for incompatible changes.
+- Increase **MINOR** for backward-compatible features.
+- Increase **PATCH** for backward-compatible fixes.
+- Reset lower version numbers to zero when increasing a higher number.
+
 ## Project Overview
 
 This project turns a DIY electric guitar into a real-time, audio-reactive RGB instrument.
 
-The guitar has **16 WS2812B addressable RGB LEDs** installed on/in the body. An **ESP32-WROOM-32** reads the guitar's analog audio signal, analyzes it in real time, and generates visual effects.
+The guitar uses a configurable WS2812B addressable RGB LED strip. The current test default is **10 LEDs**; change `NUM_LEDS` in `src/main.cpp` to 16 or 20 for a different strip. An **ESP32-WROOM-32** reads the guitar's analog audio signal, analyzes it in real time, and generates visual effects.
 
 The system should eventually react to:
 
@@ -57,7 +71,7 @@ Because the ESP32-WROOM-32 already provides built-in Wi-Fi and Bluetooth, the ES
 
 ### LEDs
 
-- 16 × WS2812B addressable RGB LEDs
+- WS2812B addressable RGB LED strip (test default: 10 LEDs; set `NUM_LEDS` in `src/main.cpp` to match the strip)
 - 5V LED power
 - Common GND between ESP32, audio circuit, and LED power supply
 
@@ -860,7 +874,7 @@ Password      : guitarled
 URL           : http://192.168.4.1/   (or http://guitar.local/ on macOS/iOS)
 ```
 
-The page shows a live preview of the 16 LEDs and controls power, brightness, effect, speed, trail length, static color, a **note → color** table (12 pitch classes, C to B, any octave), and the **pitch → position** range (lowest/highest note on the strip, plus a reverse switch for how the strip is mounted). Mappings are per single note, not per chord, because chord recognition is out of scope.
+The page shows a live preview of the configured LED count (reported by firmware) and controls power, brightness, effect, speed, trail length, static color, a **note → color** table (12 pitch classes, C to B, any octave), and the **pitch → position** range (lowest/highest note on the strip, plus a reverse switch for how the strip is mounted). Mappings are per single note, not per chord, because chord recognition is out of scope.
 
 Effects (the number is what saved settings store; new effects are only ever appended):
 
@@ -874,7 +888,7 @@ Effects (the number is what saved settings store; new effects are only ever appe
 | 11 | Ambient | Ocean | FastLED ocean palette drifting along the strip with a slow shimmer. Speed = drift |
 | 12 | Ambient | Lava | FastLED lava palette drifting along the strip with a slow shimmer. Speed = drift |
 | 3 | Whole strip | VU meter | Lit LED count follows level (readme Effect 1) |
-| 4 | Whole strip | Pitch color | All LEDs take the current note's color (readme Effect 3) |
+| 4 | Whole strip | Solo note color (all LEDs) | All LEDs show the mapped color of the current note (readme Effect 3) |
 | 15 | Whole strip | Center VU | Level bar grows from the middle to both ends, soft edge, green centre to red ends |
 | 13 | Whole strip | Peak flash | VU meter plus a mostly white flash (slightly tinted by the note) on each attack, strength max(0.35, attack strength), fading in ~120 ms (readme Effect 2) |
 | 14 | Whole strip | Sustain | Whole strip in the note color: full on a pick, follows the level while the note rings, then fades. Trail = fade time (~0.1-2 s) (readme Effect 7) |
@@ -904,7 +918,7 @@ A preset is a one-tap look. It sets only the **effect, speed, trail, static colo
 | # | Preset | Effect | Speed | Trail | Colors |
 |---|---|---|---|---|---|
 | 0 | Classic VU | VU meter | 50 | 50 | Rainbow |
-| 1 | Rainbow notes | Pitch color | 50 | 50 | Rainbow |
+| 1 | Rainbow notes | Solo note color (all LEDs) | 50 | 50 | Rainbow |
 | 2 | Melody trail | Pitch position | 50 | 85 | Rainbow |
 | 3 | Slide | Pitch direction | 60 | 40 | Neon |
 | 4 | Blues | Note flow | 30 | 80 | Ice |
@@ -917,7 +931,14 @@ A preset is a one-tap look. It sets only the **effect, speed, trail, static colo
 | 11 | Strobe | Peak flash | 50 | 50 | Neon |
 | 12 | Fireworks | Sparkle | 50 | 40 | Neon |
 | 13 | Rhythm | Step chase | 50 | 50 | Neon |
-| 14 | Starry night | Twinkle | 30 | 80 | static #b0c8ff |
+| 14 | Starry night | Twinkle | 30 | 80 | Violet |
+| 15 | Solo note color | Solo note color (all LEDs) | 50 | 50 | Rainbow |
+| 16 | Warm solo | Solo note color (all LEDs) | 50 | 50 | Fire |
+| 17 | Ice solo | Solo note color (all LEDs) | 50 | 50 | Ice |
+| 18 | Sunset flow | Note flow | 45 | 75 | Sunset |
+| 19 | Mint slide | Pitch direction | 55 | 45 | Mint |
+| 20 | Ember ripple | Ripple | 80 | 25 | Fire |
+| 21 | Violet position | Pitch position | 45 | 75 | Violet |
 
 Note color sets (C to B):
 
@@ -928,7 +949,7 @@ Ice      00ffff 00d4ff 00aaff 007fff 0055ff 002aff 0000ff 002aff 0055ff 007fff 0
 Neon     ff00ff 00ffff aaff00 ff0080 00ff80 ffff00 8000ff 00aaff ff5500 ff00aa 00ff00 0055ff
 ```
 
-The preset table lives in firmware (`src/Presets.cpp`: name, effect, speed, trail, colors) and is applied through the same settings merge and 2-second deferred save as the web page, so the Phase 8 mode button can cycle presets without a phone. On the page, the **Presets** card sits right below the live preview: tapping a preset applies it, refreshes every control and shows "Preset: name".
+The 22 presets live in firmware (`src/Presets.cpp`: name, effect, speed, trail, default colors). Tap one to apply it. To customize a palette, select its name in **Preset palette**, edit the 12 note colors, and tap **Save preset palette**. The ESP32 saves each palette in NVS; saving also applies that preset. Preset colors are shared with the **Note → color** controls while active.
 
 The **Audio** panel selects the source (Simulated guitar or Guitar input on GPIO34), shows a live level meter with an attack indicator and a pitch readout (note, cents, confidence), and sets the noise gate, full scale, release time, attack threshold and pitch confidence (see Audio Analysis below).
 
@@ -947,8 +968,9 @@ POST /api/pluck    pick the simulated guitar once
 GET  /api/adc      guitar input stats + latest 512 samples
 POST /api/tone?on=1|0   DAC test tone on GPIO26
 GET  /api/effects  {"effects": [{"mode", "group", "name", "desc", "uses"}, ...]}: the page builds its effect menu from this (src/EffectCatalog.cpp)
-GET  /api/presets  {"presets": ["Classic VU", ...]}
+GET  /api/presets  preset names and their 12 saved note colors
 POST /api/preset?i=N    apply preset N, returns the full settings JSON
+POST /api/preset/palette?i=N  save 12 note colors for preset N
 POST /api/tuner?on=1|0  tuner on the LEDs (live state, not saved)
 POST /api/battery/show  battery gauge on the LEDs for 2.5 s
 ```
@@ -1328,8 +1350,7 @@ Possible future additions:
 - Wi-Fi configuration page
 - Mobile app
 - OTA firmware update
-- Saving your own presets (15 built-in presets exist, see Presets)
-- User-defined color palettes
+- Saving additional user-defined effects
 - MIDI output
 - Tuner mode
 - Metronome synchronization

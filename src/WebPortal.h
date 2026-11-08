@@ -25,5 +25,7 @@
 #pragma once
 #include <FastLED.h>
 
-void webPortalBegin(const CRGB* leds, uint16_t numLeds);
+void webPortalBegin(CRGB* leds, uint16_t numLeds);
 void webPortalLoop();   // call every loop(); non-blocking
+bool webPortalDebugActive();
+void webPortalRenderDebug();

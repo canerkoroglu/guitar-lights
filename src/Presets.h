@@ -11,10 +11,13 @@
  */
 #pragma once
 #include <Arduino.h>
+#include "Config.h"
 
 namespace Presets {
   size_t      count();
   const char* name(size_t i);
+  void        getPalette(size_t i, RGBColor out[12]);
+  bool        setPalette(size_t i, const RGBColor colors[12]);
   bool        apply(size_t i);   // false if i is out of range
   // Strict decimal index ("3"): false for empty, signed or trailing text,
   // so "abc" or "2x" cannot silently select preset 0 or 2.

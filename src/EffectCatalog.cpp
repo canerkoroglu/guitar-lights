@@ -16,7 +16,7 @@ const EffectCatalog::Info EFFECTS[] = {
   {MODE_LAVA,            AMBIENT, "Lava",            "Reds and oranges drifting slowly along the strip.", "s"},
 
   {MODE_VU,              WHOLE,   "VU meter",        "Number of lit LEDs follows how hard you play.", ""},
-  {MODE_PITCH_COLOR,     WHOLE,   "Pitch color",     "Whole strip switches to the color of the current note.", ""},
+  {MODE_PITCH_COLOR,     WHOLE,   "Solo note color (all LEDs)", "All LEDs show the mapped color of the note being played. Edit the palette in Note → color.", ""},
   {MODE_CENTER_VU,       WHOLE,   "Center VU",       "Level bar grows from the middle out to both ends.", ""},
   {MODE_PEAK_FLASH,      WHOLE,   "Peak flash",      "VU meter, plus a white flash on every pick.", ""},
   {MODE_SUSTAIN,         WHOLE,   "Sustain",         "Whole strip in the note color: bright on a pick, follows the ringing note, then fades. Trail: fade time.", "tc"},

@@ -45,6 +45,7 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <FastLED.h>
+#include <Adafruit_NeoPixel.h>
 #include "Config.h"
 #include "AudioFeatures.h"
 #include "AudioDsp.h"
@@ -59,7 +60,8 @@
 
 // ---- Hardware ----
 static constexpr uint8_t  LED_DATA_PIN = 18;   // GPIO18 -> WS2812B DIN
-static constexpr uint16_t NUM_LEDS     = 16;
+// Set the connected strip length here (for example 10, 16, or 20).
+static constexpr uint16_t NUM_LEDS     = 10;
 #define LED_TYPE     WS2812B
 #define COLOR_ORDER  GRB
 
@@ -77,17 +79,36 @@ static constexpr uint8_t STAGE_MIN_BRIGHTNESS = 24;
 static constexpr uint8_t CRITICAL_BRIGHTNESS  = 48;
 
 CRGB         leds[NUM_LEDS];
+Adafruit_NeoPixel pixelBus(NUM_LEDS, LED_DATA_PIN, NEO_GRB + NEO_KHZ800);
 EffectEngine engine;
 static bool  audioRunning = false;   // AudioInput::begin() succeeded
+
+static void showPixels(uint8_t brightness) {
+  static CRGB previous[NUM_LEDS];
+  static bool previousValid = false;
+  bool changed = !previousValid;
+  for (uint16_t i = 0; i < NUM_LEDS; ++i) {
+    CRGB c = leds[i];
+    c.nscale8_video(brightness);
+    if (!previousValid || c != previous[i]) changed = true;
+    pixelBus.setPixelColor(i, c.r, c.g, c.b);
+    previous[i] = c;
+  }
+  if (changed) {
+    pixelBus.show();
+    previousValid = true;
+  }
+}
 
 static void quickSelfTest() {
   const CRGB seq[] = {CRGB::Red, CRGB::Green, CRGB::Blue};
   for (const CRGB& c : seq) {
     fill_solid(leds, NUM_LEDS, c);
-    FastLED.show();
+    showPixels(64);
     delay(200);   // one-time boot test only; the main loop never blocks
   }
-  FastLED.clear(true);
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  showPixels(64);
 }
 
 static void printAdc() {
@@ -227,10 +248,8 @@ void setup() {
                 ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores(),
                 ESP.getCpuFreqMHz(), ESP.getFreeHeap());
 
-  FastLED.addLeds<LED_TYPE, LED_DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS)
-         .setCorrection(TypicalLEDStrip);
-  FastLED.setBrightness(64);
-  FastLED.clear(true);
+  pixelBus.begin();
+  pixelBus.show();
   quickSelfTest();
 
   ConfigStore::begin();
@@ -272,11 +291,16 @@ void loop() {
   if (now - lastFrame >= FRAME_MS) {
     lastFrame = now;
     const Settings&       s     = ConfigStore::get();
-    const AudioFeatures   audio = readAudioFeatures();   // every frame: consumes attacks
     const Battery::Status bat   = Battery::status();
 
+    const bool ledDebug = webPortalDebugActive();
+    AudioFeatures audio{};
+    if (!ledDebug) audio = readAudioFeatures(); // don't run guitar DSP during LED diagnostics
     bool stageScreen = true;
-    if (Stage::gaugeActive(now)) {
+    if (ledDebug) {
+      webPortalRenderDebug();
+      stageScreen = false;
+    } else if (Stage::gaugeActive(now)) {
       engine.renderBatteryGauge(s, now, Stage::gaugeStartedAt(), bat.fitted ? bat.percent : -1);
     } else if (Stage::tuner()) {
       engine.renderTuner(s, now, audio);
@@ -284,13 +308,12 @@ void loop() {
       engine.render(s, now, audio);
       stageScreen = false;
     }
-    if (bat.fitted) engine.overlayBatteryWarning(s, now, bat.state);
+    if (!ledDebug && bat.fitted) engine.overlayBatteryWarning(s, now, bat.state);
 
-    uint8_t brightness = s.power ? s.brightness : 0;
+    uint8_t brightness = ledDebug ? 255 : (s.power ? s.brightness : 0);
     if (stageScreen) brightness = max(s.brightness, STAGE_MIN_BRIGHTNESS);
     if (bat.fitted && bat.state == BatteryState::Critical) brightness = min(brightness, CRITICAL_BRIGHTNESS);
-    FastLED.setBrightness(brightness);
-    FastLED.show();
+    showPixels(brightness);
   }
 
   if (now - lastBeat >= HEARTBEAT_MS) {

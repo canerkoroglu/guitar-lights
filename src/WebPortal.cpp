@@ -9,11 +9,16 @@
 #include "EffectCatalog.h"
 #include "Stage.h"
 #include "Battery.h"
+#include "FirmwareVersion.h"
 #include <ArduinoJson.h>
 
 static WebServer   server(80);
-static const CRGB* ledBuf   = nullptr;
+static CRGB*       ledBuf   = nullptr;
 static uint16_t    ledCount = 0;
+static constexpr uint16_t MAX_DEBUG_LEDS = 64;
+static CRGB        debugColors[MAX_DEBUG_LEDS];
+static bool        debugOn[MAX_DEBUG_LEDS] = {};
+static bool        debugActive = false;
 
 static const char INDEX_HTML[] PROGMEM = R"rawhtml(<!doctype html>
 <html lang="en"><head>
@@ -67,6 +72,16 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
 .presets{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:6px 0 14px}
 .presets button{padding:10px 4px;font-size:13px;background:#232836;border:1px solid var(--line)}
 .presets button.on{background:var(--acc);border-color:var(--acc)}
+.palette-edit{border-top:1px solid var(--line);margin-top:8px;padding-top:10px}
+.palette-edit button{padding:9px;font-size:13px}
+.ledtest{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;padding:6px 0 10px}
+.ledcell{display:flex;min-width:0;align-items:center;justify-content:space-between;gap:2px;padding:4px;background:#11141b;border:1px solid var(--line);border-radius:7px;font-size:10px}
+.ledcell>span{white-space:nowrap}
+.ledcell label{display:flex;align-items:center;gap:2px;font-size:9px}
+.ledcell input[type=checkbox]{width:12px;height:12px;margin:0}
+.ledcell input[type=color]{width:24px;height:23px;padding:1px;flex:none}
+.ledtest-actions{display:flex;gap:8px;padding-bottom:10px}
+.ledtest-actions button{padding:9px 5px;font-size:13px}
 .tuner{display:flex;flex-direction:column;align-items:center;padding:4px 0 14px}
 .tnote{font-size:44px;font-weight:700;line-height:1.1;min-height:1.1em}
 .tcents{font-size:14px;color:var(--mut);min-height:1.4em}
@@ -77,12 +92,26 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
 @media (max-width:420px){.notes{grid-template-columns:repeat(4,1fr)}}
 </style></head><body>
 <h1>Guitar RGB</h1>
-<p class="sub"><span id="ledCount">16</span> &times; WS2812B &middot; <span id="stat">connecting&hellip;</span><span id="batHead"></span></p>
+<p class="sub"><span id="ledCount">10</span> &times; WS2812B &middot; <span id="stat">connecting&hellip;</span><span id="batHead"></span></p>
+<p class="sub"><span class="chip" id="fwVersion">Checking firmware&hellip;</span></p>
 
 <div class="card">
   <h2>Live</h2>
   <div class="strip" id="strip"></div>
 </div>
+
+<details class="card" id="ledTestCard">
+  <summary><h2>Individual LED test</h2></summary>
+  <p class="hint">Select each LED's color and switch it on or off. Test mode uses full brightness and temporarily pauses effects.</p>
+  <div class="ledtest" id="ledTestGrid"></div>
+  <div class="ledtest-actions">
+    <button class="ghost" id="ledAllOff">All off</button>
+    <button class="ghost" id="ledAllOn">All on</button>
+    <button class="ghost" id="ledChase">Chase</button>
+    <button id="ledTestExit">Exit test</button>
+  </div>
+  <p class="hint" id="ledTestStatus">Test mode is off.</p>
+</details>
 
 <div class="card">
   <h2>Tuner</h2>
@@ -98,6 +127,13 @@ canvas{display:block;width:100%;height:140px;background:#0b0c10;border-radius:8p
 <div class="card">
   <h2>Presets</h2>
   <div class="presets" id="presets"></div>
+  <div class="palette-edit">
+    <p class="hint">Choose a preset, edit its 12 note colors, then save. The palette stays with that preset.</p>
+    <div class="row"><span>Preset palette</span><select id="palettePreset"></select></div>
+    <div class="notes" id="presetPalette"></div>
+    <button class="ghost" id="savePresetPalette">Save preset palette</button>
+    <span class="hint" id="paletteStatus"></span>
+  </div>
 </div>
 
 <details class="card" id="inputCard">
@@ -190,7 +226,7 @@ const name=m=>NOTES[m%12]+(Math.floor(m/12)-1);
 const range=(a,b)=>{let s="";for(let m=a;m<=b;m++)s+=`<option value="${m}">${name(m)}</option>`;return s;};
 let timer=null, pending={};
 
-$("strip").innerHTML="<b></b>".repeat(16);
+$("strip").innerHTML="<b></b>".repeat(10);
 $("notes").innerHTML=NOTES.map((n,i)=>`<label class="note"><input type="color" data-note="${i}">${n}</label>`).join("");
 // Same limits as ConfigStore::fromJson: pitchLow 24..107, pitchHigh 25..108, test note 24..108.
 const MIDI_MIN=24, MIDI_MAX=108;
@@ -381,14 +417,56 @@ async function load(){
   try{await loadEffects();fill(await (await fetch("/api/config")).json());status("connected");}
   catch(e){status("connection failed");}
 }
+async function loadFirmwareVersion(){
+  const badge=$("fwVersion");
+  try{
+    const r=await fetch("/api/version",{cache:"no-store"});
+    if(!r.ok)throw new Error(r.status);
+    const d=await r.json();
+    configureLedCount(d.ledCount);
+    badge.textContent="Firmware v"+d.version+" · online";
+    badge.className="chip ok";
+  }catch(e){
+    badge.textContent="Firmware version unavailable";
+    badge.className="chip bad";
+  }
+}
 
-// Presets: one button each. Applying one refreshes every control.
+// Presets: one button each, with a saved per-preset note palette.
+let presetsData=[];
+function renderPresetPalette(index){
+  const preset=presetsData[+index];
+  if(!preset)return;
+  $("presetPalette").innerHTML=NOTES.map((n,i)=>
+    `<label class="note"><input type="color" data-preset-color="${i}" value="${preset.colors[i]}">${n}</label>`
+  ).join("");
+}
 async function loadPresets(){
   try{
     const d=await (await fetch("/api/presets")).json();
-    $("presets").innerHTML=d.presets.map((n,i)=>`<button data-i="${i}">${n}</button>`).join("");
+    presetsData=d.presets;
+    $("presets").innerHTML=presetsData.map((p,i)=>`<button data-i="${i}">${p.name}</button>`).join("");
+    $("palettePreset").innerHTML=presetsData.map((p,i)=>`<option value="${i}">${p.name}</option>`).join("");
+    renderPresetPalette(0);
   }catch(e){}
 }
+$("palettePreset").onchange=e=>renderPresetPalette(e.target.value);
+$("savePresetPalette").onclick=async()=>{
+  const index=+$("palettePreset").value;
+  const colors=[...document.querySelectorAll("[data-preset-color]")].map(el=>el.value);
+  const badge=$("paletteStatus");
+  try{
+    const r=await fetch("/api/preset/palette?i="+index,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({colors})});
+    if(!r.ok)throw new Error(r.status);
+    presetsData[index].colors=colors;
+    const applied=await fetch("/api/preset?i="+index,{method:"POST"});
+    if(!applied.ok)throw new Error(applied.status);
+    fill(await applied.json());
+    document.querySelectorAll("#presets button").forEach(b=>b.classList.toggle("on",+b.dataset.i===index));
+    badge.textContent="Saved and applied";
+    status("Preset palette saved: "+presetsData[index].name);
+  }catch(e){badge.textContent="Could not save palette";}
+};
 $("presets").onclick=async e=>{
   const b=e.target.closest("button");
   if(!b)return;
@@ -401,6 +479,8 @@ $("presets").onclick=async e=>{
     if(!r.ok)throw new Error(r.status);
     fill(await r.json());
     document.querySelectorAll("#presets button").forEach(x=>x.classList.toggle("on",x===b));
+    $("palettePreset").value=b.dataset.i;
+    renderPresetPalette(b.dataset.i);
     status("Preset: "+b.textContent);
   }catch(err){status("offline");}
 };
@@ -490,6 +570,71 @@ async function pollCalibration(){
   setTimeout(pollCalibration,300);
 }
 
+let LED_COUNT=10;
+const ledTestState=Array.from({length:LED_COUNT},()=>({on:false,color:"#ff0000"}));
+function configureLedCount(count){
+  if(!Number.isInteger(count)||count<1||count>64)return;
+  if(count!==LED_COUNT){
+    LED_COUNT=count;
+    ledTestState.length=0;
+    for(let i=0;i<count;i++)ledTestState.push({on:false,color:"#ff0000"});
+  }
+  $("ledCount").textContent=count;
+  if($("strip").children.length!==count)$("strip").innerHTML="<b></b>".repeat(count);
+  renderLedTestControls();
+}
+function renderLedTestControls(){
+  $("ledTestGrid").innerHTML=ledTestState.map((x,i)=>
+    `<div class="ledcell"><span>LED ${i+1}</span><input type="color" data-led-color="${i}" value="${x.color}" aria-label="LED ${i+1} color"><label><input type="checkbox" data-led-on="${i}" ${x.on?"checked":""}>On</label></div>`
+  ).join("");
+}
+let ledTestSending=false,ledTestQueued=false,ledTestDesiredActive=true;
+let ledChaseTimer=null,ledChaseIndex=0;
+function stopLedChase(){if(ledChaseTimer){clearInterval(ledChaseTimer);ledChaseTimer=null;}}
+function syncLedCheckboxes(){
+  ledTestState.forEach((x,i)=>{const el=document.querySelector(`[data-led-on="${i}"]`);if(el)el.checked=x.on;});
+}
+async function sendLedTest(active=true){
+  const badge=$("ledTestStatus");
+  ledTestDesiredActive=active;
+  ledTestQueued=true;
+  if(ledTestSending)return;
+  ledTestSending=true;
+  while(ledTestQueued){
+    ledTestQueued=false;
+    const body=JSON.stringify({active:ledTestDesiredActive,leds:ledTestState.map(x=>({...x}))});
+    try{
+      const r=await fetch("/api/led-debug",{method:"POST",headers:{"Content-Type":"application/json"},body});
+      if(!r.ok)throw new Error(r.status);
+      const d=await r.json();
+      badge.textContent=d.active?"Individual LED test is active (full brightness).":"Test mode is off.";
+      badge.className="hint chip "+(d.active?"info":"");
+    }catch(e){badge.textContent="Could not reach the LED test endpoint.";badge.className="hint chip bad";}
+  }
+  ledTestSending=false;
+}
+$("ledTestGrid").addEventListener("change",e=>{
+  const color=e.target.dataset.ledColor,on=e.target.dataset.ledOn;
+  stopLedChase();
+  if(color!==undefined){ledTestState[+color].color=e.target.value;ledTestState[+color].on=true;syncLedCheckboxes();}
+  if(on!==undefined)ledTestState[+on].on=e.target.checked;
+  sendLedTest(true);
+});
+$("ledAllOff").onclick=()=>{stopLedChase();ledTestState.forEach(x=>x.on=false);syncLedCheckboxes();sendLedTest(true);};
+$("ledAllOn").onclick=()=>{stopLedChase();ledTestState.forEach(x=>x.on=true);syncLedCheckboxes();sendLedTest(true);};
+$("ledChase").onclick=()=>{
+  stopLedChase();ledChaseIndex=0;
+  const step=()=>{
+    ledTestState.forEach(x=>x.on=false);
+    ledTestState[ledChaseIndex].on=true;
+    syncLedCheckboxes();sendLedTest(true);
+    ledChaseIndex=(ledChaseIndex+1)%ledTestState.length;
+  };
+  step();ledChaseTimer=setInterval(step,500);
+};
+$("ledTestExit").onclick=()=>{stopLedChase();sendLedTest(false);};
+renderLedTestControls();
+
 document.addEventListener("input",onEdit);
 document.addEventListener("change",onEdit);
 $("tone").onchange=e=>(hold("tone"),fetch("/api/tone?on="+(e.target.checked?1:0),{method:"POST"}).catch(()=>status("offline")));
@@ -517,6 +662,7 @@ $("reset").onclick=async()=>{
   catch(e){status("offline");}
 };
 load();
+loadFirmwareVersion();
 loadPresets();
 poll();
 pollAdc();
@@ -529,6 +675,47 @@ static void handleRoot() { server.send_P(200, "text/html", INDEX_HTML); }
 
 static void handleGetConfig() {
   server.send(200, "application/json", ConfigStore::toJson());
+}
+
+static void handleLedDebug() {
+  JsonDocument doc;
+  const DeserializationError err = deserializeJson(doc, server.arg("plain"));
+  JsonArrayConst pixels = doc["leds"].as<JsonArrayConst>();
+  if (err || pixels.size() != ledCount || ledCount > MAX_DEBUG_LEDS || doc["active"].isNull()) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"expected active and one color/on object per LED\"}");
+    return;
+  }
+  for (uint16_t i = 0; i < ledCount; ++i) {
+    const char* color = pixels[i]["color"] | "#000000";
+    if (strlen(color) != 7 || color[0] != '#') {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid LED color\"}");
+      return;
+    }
+    char* end = nullptr;
+    const uint32_t rgb = strtoul(color + 1, &end, 16);
+    if (!end || *end != '\0') {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid LED color\"}");
+      return;
+    }
+    debugColors[i] = CRGB((rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
+    debugOn[i] = pixels[i]["on"] | false;
+  }
+  debugActive = doc["active"].as<bool>();
+  server.send(200, "application/json", debugActive ? "{\"ok\":true,\"active\":true}" : "{\"ok\":true,\"active\":false}");
+}
+
+static void handleGetFirmwareVersion() {
+  String out = "{\"version\":\"" FIRMWARE_VERSION_STRING "\",\"ledCount\":";
+  out += String(ledCount);
+  out += ",\"major\":";
+  out += String(FIRMWARE_VERSION_MAJOR);
+  out += ",\"minor\":";
+  out += String(FIRMWARE_VERSION_MINOR);
+  out += ",\"patch\":";
+  out += String(FIRMWARE_VERSION_PATCH);
+  out += "}";
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", out);
 }
 
 static void handlePostConfig() {
@@ -548,14 +735,22 @@ static void handleReset() {
 }
 
 static void handlePresets() {
-  String out = "{\"presets\":[";
+  JsonDocument doc;
+  JsonArray list = doc["presets"].to<JsonArray>();
   for (size_t i = 0; i < Presets::count(); i++) {
-    if (i) out += ',';
-    out += '"';
-    out += Presets::name(i);
-    out += '"';
+    JsonObject preset = list.add<JsonObject>();
+    preset["name"] = Presets::name(i);
+    RGBColor colors[12];
+    Presets::getPalette(i, colors);
+    JsonArray palette = preset["colors"].to<JsonArray>();
+    for (size_t n = 0; n < 12; ++n) {
+      char hex[8];
+      snprintf(hex, sizeof(hex), "#%02x%02x%02x", colors[n].r, colors[n].g, colors[n].b);
+      palette.add(hex);
+    }
   }
-  out += "]}";
+  String out;
+  serializeJson(doc, out);
   server.send(200, "application/json", out);
 }
 
@@ -583,6 +778,42 @@ static void handlePreset() {
   } else {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"no such preset\"}");
   }
+}
+
+static void handleSavePresetPalette() {
+  size_t index = 0;
+  if (!Presets::parseIndex(server.arg("i").c_str(), index)) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"no such preset\"}");
+    return;
+  }
+  JsonDocument doc;
+  const DeserializationError err = deserializeJson(doc, server.arg("plain"));
+  JsonArrayConst palette = doc["colors"].as<JsonArrayConst>();
+  if (err || palette.size() != 12) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"expected 12 hex colors\"}");
+    return;
+  }
+  RGBColor colors[12];
+  for (size_t i = 0; i < 12; ++i) {
+    const char* text = palette[i] | "";
+    if (strlen(text) != 7 || text[0] != '#') {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid color\"}");
+      return;
+    }
+    for (size_t c = 1; c < 7; ++c) {
+      if (!isxdigit((unsigned char)text[c])) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid color\"}");
+        return;
+      }
+    }
+    const uint32_t rgb = strtoul(text + 1, nullptr, 16);
+    colors[i] = {(uint8_t)(rgb >> 16), (uint8_t)(rgb >> 8), (uint8_t)rgb};
+  }
+  if (!Presets::setPalette(index, colors)) {
+    server.send(500, "application/json", "{\"ok\":false,\"error\":\"palette storage failed\"}");
+    return;
+  }
+  server.send(200, "application/json", "{\"ok\":true}");
 }
 
 static void handleLeds() {
@@ -675,13 +906,22 @@ static void handleTone() {
   server.send(200, "application/json", TestTone::active() ? "{\"tone\":true}" : "{\"tone\":false}");
 }
 
-void webPortalBegin(const CRGB* leds, uint16_t numLeds) {
+bool webPortalDebugActive() { return debugActive; }
+
+void webPortalRenderDebug() {
+  if (!debugActive || !ledBuf) return;
+  for (uint16_t i = 0; i < ledCount; ++i) ledBuf[i] = debugOn[i] ? debugColors[i] : CRGB::Black;
+}
+
+void webPortalBegin(CRGB* leds, uint16_t numLeds) {
   if (!EffectCatalog::selfCheck()) Serial.println(F("error: EffectCatalog lists an effect twice"));
   ledBuf   = leds;
   ledCount = numLeds;
 
   server.on("/",           HTTP_GET,  handleRoot);
   server.on("/api/config", HTTP_GET,  handleGetConfig);
+  server.on("/api/led-debug", HTTP_POST, handleLedDebug);
+  server.on("/api/version", HTTP_GET, handleGetFirmwareVersion);
   server.on("/api/config", HTTP_POST, handlePostConfig);
   server.on("/api/reset",  HTTP_POST, handleReset);
   server.on("/api/leds",   HTTP_GET,  handleLeds);
@@ -691,6 +931,7 @@ void webPortalBegin(const CRGB* leds, uint16_t numLeds) {
   server.on("/api/calibrate", HTTP_POST, handleStartCalibration);
   server.on("/api/tone",   HTTP_POST, handleTone);
   server.on("/api/presets", HTTP_GET, handlePresets);
+  server.on("/api/preset/palette", HTTP_POST, handleSavePresetPalette);
   server.on("/api/effects", HTTP_GET, handleEffects);
   server.on("/api/tuner",   HTTP_POST, handleTuner);
   server.on("/api/battery/show", HTTP_POST, handleBatteryShow);
